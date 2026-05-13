@@ -1,0 +1,26 @@
+{
+  "run_id": "eval_sample_rules",
+  "mode": "rules",
+  "timestamp": "2026-05-12T13:36:15",
+  "metrics": {
+    "overall_pass_rate": 1.0,
+    "intent_accuracy": 1.0,
+    "order_id_accuracy": 1.0,
+    "reason_accuracy": 1.0,
+    "avg_latency_ms": 0.1
+  },
+  "quality_gates": {
+    "min_intent_accuracy": 0.75,
+    "ci_status": "pass"
+  },
+  "case_summary": {
+    "total": 20,
+    "passed": 20,
+    "failed": 0
+  },
+  "tag_examples": [
+    {"tag": "refund", "accuracy": 1.0},
+    {"tag": "query_policy", "accuracy": 1.0},
+    {"tag": "explicit_order_id", "accuracy": 1.0}
+  ]
+}

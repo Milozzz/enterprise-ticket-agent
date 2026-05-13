@@ -1,0 +1,166 @@
+{
+  "version": "1.0",
+  "description": "Golden dataset for enterprise-ticket-agent classifier evaluation",
+  "cases": [
+    {
+      "id": "C001",
+      "input": "我要退款，订单号是ORD-2024-001",
+      "expected_intent": "refund",
+      "expected_order_id": "ORD-2024-001",
+      "expected_reason": null,
+      "tags": ["refund", "explicit_order_id"]
+    },
+    {
+      "id": "C002",
+      "input": "申请退款，订单 #20241201-9988",
+      "expected_intent": "refund",
+      "expected_order_id": "20241201-9988",
+      "expected_reason": null,
+      "tags": ["refund", "hash_prefix_order_id"]
+    },
+    {
+      "id": "C003",
+      "input": "我想退货，商品收到后发现是坏的",
+      "expected_intent": "refund",
+      "expected_order_id": null,
+      "expected_reason": "商品破损",
+      "tags": ["refund", "damage_reason", "no_order_id"]
+    },
+    {
+      "id": "C004",
+      "input": "这个东西质量太差了，要退款",
+      "expected_intent": "refund",
+      "expected_order_id": null,
+      "expected_reason": "质量问题",
+      "tags": ["refund", "quality_reason"]
+    },
+    {
+      "id": "C005",
+      "input": "发错货了，我收到的不是我订的东西，订单号ORD-5678",
+      "expected_intent": "refund",
+      "expected_order_id": "ORD-5678",
+      "expected_reason": "发错商品",
+      "tags": ["refund", "wrong_item_reason"]
+    },
+    {
+      "id": "C006",
+      "input": "七天内不想要了，可以退吗",
+      "expected_intent": "refund",
+      "expected_order_id": null,
+      "expected_reason": "七天无理由",
+      "tags": ["refund", "no_reason_policy"]
+    },
+    {
+      "id": "C007",
+      "input": "我的退款申请进度怎么样了",
+      "expected_intent": "query_order",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_order", "status_check"]
+    },
+    {
+      "id": "C008",
+      "input": "订单ORD-1234的处理状态是什么",
+      "expected_intent": "query_order",
+      "expected_order_id": "ORD-1234",
+      "expected_reason": null,
+      "tags": ["query_order", "explicit_order_id"]
+    },
+    {
+      "id": "C009",
+      "input": "工单什么时候能处理完",
+      "expected_intent": "query_order",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_order", "timeline"]
+    },
+    {
+      "id": "C010",
+      "input": "七天无理由退款政策怎么规定的",
+      "expected_intent": "query_policy",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_policy", "policy_question"]
+    },
+    {
+      "id": "C011",
+      "input": "退款要多少天才能到账",
+      "expected_intent": "query_policy",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_policy", "timeline_policy"]
+    },
+    {
+      "id": "C012",
+      "input": "破损商品退款流程是什么",
+      "expected_intent": "query_policy",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_policy", "process_policy"]
+    },
+    {
+      "id": "C013",
+      "input": "你好",
+      "expected_intent": "other",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["other", "greeting"]
+    },
+    {
+      "id": "C014",
+      "input": "人工客服在吗",
+      "expected_intent": "other",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["other", "human_agent"]
+    },
+    {
+      "id": "C015",
+      "input": "我的包裹现在在哪里",
+      "expected_intent": "other",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["other", "logistics"]
+    },
+    {
+      "id": "C016",
+      "input": "申请退款 ORDER:2024-88776655",
+      "expected_intent": "refund",
+      "expected_order_id": "2024-88776655",
+      "expected_reason": null,
+      "tags": ["refund", "colon_separator_order_id"]
+    },
+    {
+      "id": "C017",
+      "input": "商品未收到，物流显示签收但是我没拿到",
+      "expected_intent": "refund",
+      "expected_order_id": null,
+      "expected_reason": "未收到商品",
+      "tags": ["refund", "not_received_reason"]
+    },
+    {
+      "id": "C018",
+      "input": "退款金额多少？运费谁出？",
+      "expected_intent": "query_policy",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_policy", "shipping_fee"]
+    },
+    {
+      "id": "C019",
+      "input": "我想退款，单号是12345",
+      "expected_intent": "refund",
+      "expected_order_id": "12345",
+      "expected_reason": null,
+      "tags": ["refund", "numeric_order_id"]
+    },
+    {
+      "id": "C020",
+      "input": "大额退款需要审批吗",
+      "expected_intent": "query_policy",
+      "expected_order_id": null,
+      "expected_reason": null,
+      "tags": ["query_policy", "approval_policy"]
+    }
+  ]
+}

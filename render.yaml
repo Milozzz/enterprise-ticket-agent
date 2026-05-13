@@ -1,0 +1,47 @@
+services:
+  - type: redis
+    name: enterprise-ticket-agent-redis
+    plan: free
+    ipAllowList: []
+
+  - type: web
+    name: enterprise-ticket-agent-backend
+    env: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: enterprise-ticket-agent-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: enterprise-ticket-agent-redis
+          property: connectionString
+
+databases:
+  - name: enterprise-ticket-agent-db
+    plan: free

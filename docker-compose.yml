@@ -1,0 +1,89 @@
+# ============================================================
+# Enterprise Ticket Agent — Docker Compose
+# 一键拉起：PostgreSQL + Redis + Backend (FastAPI) + Frontend (Next.js)
+#
+# 用法：
+#   1. 复制 .env.example → .env，填入真实 API Key
+#   2. docker-compose up -d --build
+#   3. 前端 http://localhost:3000  后端 http://localhost:8000/docs
+# ============================================================
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ticket_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ticketuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ticketpass}
+      POSTGRES_DB: ${POSTGRES_DB:-ticketdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ticketuser} -d ${POSTGRES_DB:-ticketdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: ticket_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend (FastAPI + LangGraph) ─────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ticket_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                          # 统一从仓库根 .env 注入所有变量
+    environment:
+      # 覆盖 .env 中的本地地址，指向 compose 内部服务名
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ticketuser}:${POSTGRES_PASSWORD:-ticketpass}@postgres:5432/${POSTGRES_DB:-ticketdb}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["/app/start.sh"]
+
+  # ── Frontend (Next.js) ────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 构建时内联到客户端 JS（NEXT_PUBLIC_* 必须在 build 阶段可用）
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    container_name: ticket_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # 服务端 route handler 用（server → backend 走 compose 内网）
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,43 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="760" fill="#F8FAFC"/>
+  <rect x="40" y="32" width="1120" height="88" rx="8" fill="white" stroke="#E2E8F0"/>
+  <text x="72" y="84" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0F172A">Enterprise Ticket Agent Dashboard</text>
+  <text x="72" y="108" font-family="Arial, sans-serif" font-size="14" fill="#64748B">Node latency, failure rate, token usage, audit replay</text>
+  <g transform="translate(40 152)">
+    <rect width="260" height="112" rx="8" fill="white" stroke="#E2E8F0"/>
+    <text x="24" y="36" font-family="Arial" font-size="14" fill="#64748B">Total Tickets</text>
+    <text x="24" y="78" font-family="Arial" font-size="34" font-weight="700" fill="#0F172A">3</text>
+  </g>
+  <g transform="translate(320 152)">
+    <rect width="260" height="112" rx="8" fill="white" stroke="#E2E8F0"/>
+    <text x="24" y="36" font-family="Arial" font-size="14" fill="#64748B">Auto Resolved</text>
+    <text x="24" y="78" font-family="Arial" font-size="34" font-weight="700" fill="#16A34A">33.3%</text>
+  </g>
+  <g transform="translate(600 152)">
+    <rect width="260" height="112" rx="8" fill="white" stroke="#E2E8F0"/>
+    <text x="24" y="36" font-family="Arial" font-size="14" fill="#64748B">P95 Latency</text>
+    <text x="24" y="78" font-family="Arial" font-size="34" font-weight="700" fill="#2563EB">210 ms</text>
+  </g>
+  <g transform="translate(880 152)">
+    <rect width="280" height="112" rx="8" fill="white" stroke="#E2E8F0"/>
+    <text x="24" y="36" font-family="Arial" font-size="14" fill="#64748B">LLM Tokens</text>
+    <text x="24" y="78" font-family="Arial" font-size="34" font-weight="700" fill="#7C3AED">180</text>
+  </g>
+  <rect x="40" y="296" width="720" height="400" rx="8" fill="white" stroke="#E2E8F0"/>
+  <text x="72" y="336" font-family="Arial" font-size="18" font-weight="700" fill="#0F172A">Node Observability</text>
+  <g transform="translate(88 384)">
+    <rect x="0" y="150" width="64" height="98" fill="#2563EB"/>
+    <rect x="96" y="190" width="64" height="58" fill="#2563EB"/>
+    <rect x="192" y="168" width="64" height="80" fill="#2563EB"/>
+    <rect x="288" y="88" width="64" height="160" fill="#F97316"/>
+    <rect x="384" y="118" width="64" height="130" fill="#2563EB"/>
+    <rect x="480" y="42" width="64" height="206" fill="#94A3B8"/>
+    <line x1="0" y1="248" x2="580" y2="248" stroke="#CBD5E1"/>
+  </g>
+  <rect x="792" y="296" width="368" height="400" rx="8" fill="white" stroke="#E2E8F0"/>
+  <text x="824" y="336" font-family="Arial" font-size="18" font-weight="700" fill="#0F172A">Failed Traces</text>
+  <rect x="824" y="368" width="304" height="56" rx="6" fill="#FEF2F2" stroke="#FECACA"/>
+  <text x="844" y="402" font-family="Arial" font-size="14" fill="#991B1B">human_review · Demo rejected case</text>
+  <rect x="824" y="448" width="304" height="56" rx="6" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <text x="844" y="482" font-family="Arial" font-size="14" fill="#475569">demo-thread-auto-refund replay ready</text>
+</svg>

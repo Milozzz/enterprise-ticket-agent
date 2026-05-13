@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+backend/venv/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+
+# Local databases and generated eval output
+*.db
+*.sqlite
+*.sqlite3
+backend/evals/results_*.json
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+frontend/.next/
+frontend/node_modules/
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
