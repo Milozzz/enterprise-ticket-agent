@@ -358,23 +358,15 @@ function JsonHeightExpand({
 
 function AuditLogCard({
   log,
-  typewriterSkip,
 }: {
   log: AuditLogEntry;
-  typewriterSkip: boolean;
 }) {
   const [jsonOpen, setJsonOpen] = useState(false);
   const jsonStr = JSON.stringify(sanitizePayloadForDisplay(log), null, 2);
   const headerDurationLabel = useMemo(() => resolveHeaderDurationLabel(log), [log]);
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-      className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
-    >
+    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <button
         type="button"
         onClick={() => setJsonOpen((v) => !v)}
@@ -392,7 +384,7 @@ function AuditLogCard({
               <div className="flex min-w-0 flex-1 items-center truncate leading-4 text-slate-800">
                 <TypewriterText
                   text={titleForLog(log)}
-                  skip={typewriterSkip}
+                  skip
                   charMinMs={20}
                   charMaxMs={50}
                   className="leading-4"
@@ -418,7 +410,7 @@ function AuditLogCard({
       <div className="border-t border-slate-100 px-3 pb-3">
         <JsonHeightExpand open={jsonOpen} jsonStr={jsonStr} />
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -439,12 +431,6 @@ export default function AuditLogPanel({
   const bottomRef = useRef<HTMLDivElement>(null);
   const tail = logs.slice(-200);
 
-  const lastGlobalIdx = logs.length > 0 ? logs.length - 1 : -1;
-  const lastRowKey =
-    tail.length > 0 && lastGlobalIdx >= 0
-      ? `${tail[tail.length - 1].time}-${tail[tail.length - 1].node}-${lastGlobalIdx}`
-      : "";
-
   /** 仅当日志条数或「最后一条」实质变化时滚到底，避免轮询新数组引用 / 展开 JSON 时误触发 */
   const autoScrollSigRef = useRef<string>("");
   useEffect(() => {
@@ -456,7 +442,7 @@ export default function AuditLogPanel({
     const sig = `${logs.length}:${last.time}:${last.node}:${last.event}`;
     if (sig === autoScrollSigRef.current) return;
     autoScrollSigRef.current = sig;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "nearest" });
   }, [logs]);
 
   return (
@@ -569,14 +555,10 @@ export default function AuditLogPanel({
                   const globalIdx = Math.max(0, logs.length - tail.length) + i;
                   const rowKey = `${log.time}-${log.node}-${globalIdx}`;
                   // 非末行不播放打字机；对话流已结束则末行也一次性展示，避免 isLoading 未复位时光标 █ 一直闪
-                  const typewriterSkip =
-                    rowKey !== lastRowKey || !isLoading;
-
                   return (
                     <AuditLogCard
                       key={rowKey}
                       log={log}
-                      typewriterSkip={typewriterSkip}
                     />
                   );
                 })}

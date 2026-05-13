@@ -194,6 +194,7 @@ async def chat_with_agent(
 
             # 首包 SSE：把 trace_id 发给前端，让它能在 UI 展示
             yield _sse("meta", {"trace_id": trace_id, "thread_id": thread_id})
+            yield _sse("text", {"content": "已收到请求，正在查询订单并评估风险...\n\n"})
 
             from app.agent.state_machine import RefundState
             _refund_state = RefundState.CREATED
