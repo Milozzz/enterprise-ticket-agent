@@ -3,6 +3,8 @@ import { StreamData, StreamingTextResponse, formatStreamPart } from "ai";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 
+export const maxDuration = 60;
+
 // Langfuse JS SDK —— 仅在 server-side route handler 中使用
 // 如果 key 未配置，getLangfuse() 返回 null，追踪静默跳过
 function getLangfuse() {

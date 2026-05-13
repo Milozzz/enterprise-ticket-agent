@@ -31,9 +31,6 @@ const ApprovalPanel = dyn(() => import("@/components/generative/ApprovalPanel"))
 const RiskAlert = dyn(() => import("@/components/generative/RiskAlert"));
 const RefundTimeline = dyn(() => import("@/components/generative/RefundTimeline"));
 const EmailPreview = dyn(() => import("@/components/generative/EmailPreview"));
-const AgentThinkingStream = dyn(() =>
-  import("@/components/generative/AgentThinkingStream")
-);
 
 export default function ChatPage() {
   const { currentRole, currentUserId } = useAuthStore();
@@ -45,6 +42,7 @@ export default function ChatPage() {
   const nextThreadIdRef = useRef(`thread_${Date.now()}`);
   const nextTraceIdRef  = useRef(`trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const pollTimerRef  = useRef<NodeJS.Timeout | null>(null);
+  const lastAuditSignatureRef = useRef("");
 
   // ── Vercel AI SDK useChat ──────────────────────────────────────
   const { messages, input, setInput, handleSubmit, isLoading } = useChat({
@@ -69,13 +67,22 @@ export default function ChatPage() {
     const poll = async () => {
       try {
         const res = await fetch(`/api/agent/audit/${activeThreadId}`);
-        if (res.ok) setAuditLogs(await res.json());
+        if (res.ok) {
+          const nextLogs = (await res.json()) as AuditLogEntry[];
+          const signature = JSON.stringify(
+            nextLogs.map((log) => [log.time, log.node, log.event, log.output])
+          );
+          if (signature !== lastAuditSignatureRef.current) {
+            lastAuditSignatureRef.current = signature;
+            setAuditLogs(nextLogs);
+          }
+        }
       } catch {}
-      pollTimerRef.current = setTimeout(poll, 2000);
+      pollTimerRef.current = setTimeout(poll, isLoading ? 1000 : 4000);
     };
     poll();
     return () => { if (pollTimerRef.current) clearTimeout(pollTimerRef.current); };
-  }, [activeThreadId]);
+  }, [activeThreadId, isLoading]);
 
   // ── 自动滚到底部 ───────────────────────────────────────────────
   useEffect(() => {
@@ -85,7 +92,26 @@ export default function ChatPage() {
 
   // ── 后端健康检查 ───────────────────────────────────────────────
   useEffect(() => {
-    fetch("/api/health").then(r => setBackendOk(r.ok)).catch(() => setBackendOk(false));
+    let cancelled = false;
+    const delays = [0, 1000, 2500, 5000];
+
+    const checkHealth = async () => {
+      for (const delay of delays) {
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        try {
+          const res = await fetch("/api/health", { cache: "no-store" });
+          if (cancelled) return;
+          if (res.ok) {
+            setBackendOk(true);
+            return;
+          }
+        } catch {}
+      }
+      if (!cancelled) setBackendOk(false);
+    };
+
+    checkHealth();
+    return () => { cancelled = true; };
   }, []);
 
   // ── 提交（每次生成新 thread_id） ──────────────────────────────
@@ -95,6 +121,7 @@ export default function ChatPage() {
     nextThreadIdRef.current = freshId;
     nextTraceIdRef.current = freshTraceId;
     setActiveThreadId(freshId);
+    lastAuditSignatureRef.current = "";
     setAuditLogs([]);
     handleSubmit(e, { body: { user_id: currentUserId, user_role: currentRole, thread_id: freshId, trace_id: freshTraceId } });
   }, [handleSubmit, currentUserId, currentRole]);
@@ -117,7 +144,6 @@ export default function ChatPage() {
       case "RiskAlert":           inner = <RiskAlert data={p} />; break;
       case "RefundTimeline":      inner = <RefundTimeline data={p} />; break;
       case "EmailPreview":        inner = <EmailPreview data={p} />; break;
-      case "AgentThinkingStream": inner = <AgentThinkingStream {...p} />; break;
       default:                    inner = null;
     }
     if (inner == null) return null;
@@ -149,7 +175,7 @@ export default function ChatPage() {
               {messages.map((msg) => {
                 const uiEvents: UiEvent[] = msg.role === "assistant"
                   ? ((msg.annotations ?? []) as any[])
-                      .filter(a => a?.type === "ui")
+                      .filter(a => a?.type === "ui" && a.uiType !== "AgentThinkingStream")
                       .map(a => ({ type: a.uiType as string, props: a.props }))
                   : [];
 
@@ -200,14 +226,15 @@ export default function ChatPage() {
               {isLoading && (() => {
                 const last = messages[messages.length - 1];
                 const ann  = (last?.annotations ?? []) as any[];
-                return !last?.content && !ann.some(a => a?.type === "ui");
+                return last?.role === "user" || (!last?.content && !ann.some(a => a?.type === "ui"));
               })() && (
                 <div className="flex gap-4">
                   <div className="flex h-9 w-9 items-center justify-center rounded-xl border bg-primary text-primary-foreground shadow-lg shadow-primary/20">
                     <BotMessageSquare className="h-5 w-5 animate-pulse" />
                   </div>
-                  <div className="bg-background border rounded-2xl rounded-tl-none px-4 py-3 shadow-sm">
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <div className="flex items-center gap-2 bg-background border rounded-2xl rounded-tl-none px-4 py-3 text-sm text-muted-foreground shadow-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Agent 正在处理，请稍候...</span>
                   </div>
                 </div>
               )}

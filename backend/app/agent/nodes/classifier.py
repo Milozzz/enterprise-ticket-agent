@@ -137,13 +137,18 @@ async def classify_intent_node(state: AgentState) -> dict:
     # 调试：打印用户消息
     logger.info("processing_user_message", content=user_message)
 
-    try:
-        # 优先尝试 LLM 解析
-        parsed = await _llm_classify(user_message)
-    except Exception as e:
-        logger.warning("llm_classify_failed_fallback_to_rules", error=str(e))
-        # LLM 不可用时降级为规则引擎
-        parsed = _rule_classify(user_message)
+    rule_parsed = _rule_classify(user_message)
+    if _is_high_confidence_rule_match(rule_parsed):
+        parsed = rule_parsed
+        parsed["_method"] = "rules_fast_path"
+    else:
+        try:
+            # 优先尝试 LLM 解析
+            parsed = await _llm_classify(user_message)
+        except Exception as e:
+            logger.warning("llm_classify_failed_fallback_to_rules", error=str(e))
+            # LLM 不可用时降级为规则引擎
+            parsed = rule_parsed
 
     logger.info(
         "intent_classified",
@@ -228,6 +233,22 @@ async def _llm_classify(user_message: str) -> dict:
     except Exception as e:
         logger.error("llm_invoke_error", error=str(e))
         raise
+
+def _is_high_confidence_rule_match(parsed: dict) -> bool:
+    """Skip the LLM when deterministic rules already identify the production demo flows."""
+    intent = parsed.get("intent", "other")
+    order_id = parsed.get("order_id", "")
+    reason = parsed.get("reason", "other")
+
+    if intent == "refund" and order_id:
+        return True
+    if intent in {"query_order", "track_logistics"} and order_id:
+        return True
+    if intent == "query_policy" and not order_id:
+        return True
+    if reason != "other" and order_id:
+        return True
+    return False
 
 
 def _rule_classify(user_message: str) -> dict:

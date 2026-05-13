@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 
+export const maxDuration = 20;
+
 /**
  * GET /api/health
  * 代理检查 Python 后端 /health（供浏览器同源请求）
@@ -11,7 +13,7 @@ export async function GET() {
     const res = await fetch(`${BACKEND_URL}/health`, {
       method: "GET",
       cache: "no-store",
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
       return NextResponse.json(
