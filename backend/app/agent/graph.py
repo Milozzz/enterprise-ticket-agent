@@ -49,7 +49,9 @@ except ImportError:
 
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
+from app.agent.workflow_factory import route_to_workflow_entry
 
+from app.agent.nodes.supervisor import supervisor_router_node
 from app.agent.nodes.classifier import classify_intent_node
 from app.agent.nodes.order_lookup import lookup_order_node
 from app.agent.nodes.risk_check import check_risk_node
@@ -57,6 +59,8 @@ from app.agent.nodes.user_history import fetch_user_history_node
 from app.agent.nodes.human_review import human_review_node, should_continue_after_review
 from app.agent.nodes.refund import execute_refund_node
 from app.agent.nodes.notification import send_notification_node
+from app.agent.nodes.permission_request import permission_request_node
+from app.agent.nodes.reimbursement import reimbursement_node
 from app.agent.nodes.answer import answer_node, route_answer, ANSWER_TOOLS
 from app.agent.nodes.policy import answer_policy_node
 from app.agent.nodes.summarize import summarize_session_node, should_summarize
@@ -139,6 +143,7 @@ def build_graph(checkpointer=None) -> StateGraph:
     builder = StateGraph(AgentState)
 
     # ---- 注册所有节点 ----
+    builder.add_node("supervisor_router", supervisor_router_node)
     builder.add_node("classify_intent", classify_intent_node)
     builder.add_node("answer_node", answer_node)
     # ToolNode：自动执行 answer_node 的 tool_calls，结果写入 state.messages
@@ -151,11 +156,24 @@ def build_graph(checkpointer=None) -> StateGraph:
     builder.add_node("human_review", human_review_node)
     builder.add_node("execute_refund", execute_refund_node)
     builder.add_node("send_notification", send_notification_node)
+    builder.add_node("permission_request", permission_request_node)
+    builder.add_node("reimbursement", reimbursement_node)
     # 会话摘要（仅对实质性会话触发）
     builder.add_node("summarize_session", summarize_session_node)
 
     # ---- 定义边（流程）----
-    builder.set_entry_point("classify_intent")
+    builder.set_entry_point("supervisor_router")
+
+    # Supervisor first picks a business scenario; the selected workflow owns the rest.
+    builder.add_conditional_edges(
+        "supervisor_router",
+        route_to_workflow_entry,
+        {
+            "classify_intent": "classify_intent",
+            "permission_request": "permission_request",
+            "reimbursement": "reimbursement",
+        },
+    )
 
     # 意图路由：classify_intent 后分叉
     builder.add_conditional_edges(
@@ -229,6 +247,8 @@ def build_graph(checkpointer=None) -> StateGraph:
 
     builder.add_edge("execute_refund", "send_notification")
     builder.add_edge("send_notification", "summarize_session")
+    builder.add_edge("permission_request", END)
+    builder.add_edge("reimbursement", END)
 
     # ---- 编译（注入 Checkpointer）----
     compile_kwargs = {}

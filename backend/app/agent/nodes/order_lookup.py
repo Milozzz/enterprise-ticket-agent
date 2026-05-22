@@ -5,6 +5,7 @@
 
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
+from app.agent.tool_gateway import execute_tool, gateway_context_from_state
 from app.agent.tools.order_tools import get_order_detail
 from app.core.logging import get_logger
 
@@ -44,7 +45,15 @@ async def lookup_order_node(state: AgentState) -> dict:
         # 调用工具（Function Calling）
         # 注意：这里直接调用 invoke，工具内部已经处理了事件循环桥接
         logger.info("invoking_get_order_detail", order_id=order_id)
-        order_data = get_order_detail.invoke({"order_id": order_id})
+        gateway_result = execute_tool(
+            "lookup_order",
+            {"order_id": order_id},
+            context=gateway_context_from_state(state),
+            handler=get_order_detail,
+        )
+        if not gateway_result.success:
+            raise RuntimeError(gateway_result.error or "lookup_order failed")
+        order_data = gateway_result.data
         logger.info("tool_output", data=order_data)
 
         if not order_data or "error" in order_data:
@@ -55,6 +64,7 @@ async def lookup_order_node(state: AgentState) -> dict:
                 "error_message": f"未找到订单 #{order_id}，请确认订单号是否正确（原因：{raw_msg}）",
                 "reply_text": f"未找到订单 **#{order_id}**，请确认订单号是否正确。\n\n您可以尝试：「订单号 789012 申请退款，质量问题」",
                 "current_step": "lookup_order_error",
+                "tool_gateway_events": [gateway_result.audit_event],
                 "ui_events": [ui_thinking],
             }
 
@@ -75,6 +85,7 @@ async def lookup_order_node(state: AgentState) -> dict:
             "order_amount": order_data.get("totalAmount", 0.0),
             "user_id": order_data.get("userId", get_state_val(state, "user_id", "unknown")),
             "current_step": "lookup_order_done",
+            "tool_gateway_events": [gateway_result.audit_event],
             "ui_events": [ui_thinking, ui_order_card],
         }
 

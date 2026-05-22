@@ -9,7 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import Link from "next/link";
-import { ShieldCheck, User, Headset, Sparkles, LayoutDashboard } from "lucide-react";
+import { ShieldCheck, User, Headset, Sparkles, LayoutDashboard, Settings2, FlaskConical, ClipboardCheck, Boxes } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function Header() {
@@ -41,6 +41,30 @@ export function Header() {
             <Link href="/dashboard" className="inline-flex items-center gap-2">
               <LayoutDashboard className="h-4 w-4" />
               运营监控
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden sm:inline-flex text-slate-600" asChild>
+            <Link href="/admin/scenarios" className="inline-flex items-center gap-2">
+              <Settings2 className="h-4 w-4" />
+              Scenario Studio
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/simulation" className="inline-flex items-center gap-2">
+              <FlaskConical className="h-4 w-4" />
+              Simulation Lab
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/approvals" className="inline-flex items-center gap-2">
+              <ClipboardCheck className="h-4 w-4" />
+              Approval Center
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden 2xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/platform" className="inline-flex items-center gap-2">
+              <Boxes className="h-4 w-4" />
+              Platform
             </Link>
           </Button>
           <div className="hidden md:flex items-center gap-2 mr-2">

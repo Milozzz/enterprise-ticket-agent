@@ -4,7 +4,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import chat, dashboard, tickets
+from app.api.routes import admin_config, approvals, chat, dashboard, tickets
 from app.core.config import effective_simulate_database_down, get_settings
 from app.core.logging import setup_logging
 from app.core.observability import flush_langfuse, get_langfuse_client
@@ -69,8 +69,10 @@ app.add_middleware(CORSMiddleware, **_cors_kw)
 app.add_middleware(RateLimitMiddleware)
 
 app.include_router(chat.router, prefix="/api/agent", tags=["Agent"])
+app.include_router(approvals.router, prefix="/api/agent", tags=["Agent"])
 app.include_router(tickets.router, prefix="/api/tickets", tags=["Tickets"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
+app.include_router(admin_config.router, prefix="/api/admin", tags=["Admin"])
 
 
 # ── 认证路由（签发 JWT，供开发/测试使用）────────────────────────────────────────

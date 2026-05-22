@@ -93,7 +93,9 @@ export type UiEventType =
   | "RiskAlert"
   | "ApprovalPanel"
   | "RefundTimeline"
-  | "EmailPreview";
+  | "EmailPreview"
+  | "BusinessRequestCard"
+  | "GenericApprovalPanel";
 
 export interface UiEvent {
   type: UiEventType | string;

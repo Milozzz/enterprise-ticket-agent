@@ -1,0 +1,147 @@
+{
+  "version": "2026-05-20.v1",
+  "default_action_effect": "allow",
+  "actions": {
+    "approve_refund": {
+      "description": "Approve a high-risk refund after HITL review.",
+      "allowed_roles": ["MANAGER"],
+      "risk_level": "high"
+    },
+    "reject_refund": {
+      "description": "Reject a refund after HITL review.",
+      "allowed_roles": ["MANAGER"],
+      "risk_level": "high"
+    },
+    "execute_refund": {
+      "description": "Execute the final refund side effect.",
+      "allowed_roles": ["AGENT", "MANAGER"],
+      "risk_level": "high"
+    },
+    "lookup_order": {
+      "description": "Read order details before refund processing.",
+      "allowed_roles": ["USER", "AGENT", "MANAGER"],
+      "risk_level": "low"
+    },
+    "check_risk_level": {
+      "description": "Evaluate refund risk before execution.",
+      "allowed_roles": ["USER", "AGENT", "MANAGER"],
+      "risk_level": "medium"
+    },
+    "send_notification": {
+      "description": "Notify finance or operations after refund execution.",
+      "allowed_roles": ["AGENT", "MANAGER"],
+      "risk_level": "medium"
+    },
+    "submit_refund": {
+      "description": "Submit a refund request into the workflow.",
+      "allowed_roles": ["USER", "AGENT", "MANAGER"],
+      "risk_level": "medium"
+    },
+    "create_permission_request": {
+      "description": "Create an enterprise permission request.",
+      "allowed_roles": ["AGENT", "MANAGER"],
+      "risk_level": "high"
+    },
+    "approve_permission_request": {
+      "description": "Approve an enterprise permission request after HITL review.",
+      "allowed_roles": ["MANAGER", "SECURITY"],
+      "risk_level": "high"
+    },
+    "reject_permission_request": {
+      "description": "Reject an enterprise permission request after HITL review.",
+      "allowed_roles": ["MANAGER", "SECURITY"],
+      "risk_level": "high"
+    },
+    "create_reimbursement_request": {
+      "description": "Create an employee reimbursement request.",
+      "allowed_roles": ["AGENT", "MANAGER"],
+      "risk_level": "medium"
+    },
+    "approve_reimbursement": {
+      "description": "Approve an employee reimbursement request after HITL review.",
+      "allowed_roles": ["MANAGER", "FINANCE"],
+      "risk_level": "medium"
+    },
+    "reject_reimbursement": {
+      "description": "Reject an employee reimbursement request after HITL review.",
+      "allowed_roles": ["MANAGER", "FINANCE"],
+      "risk_level": "medium"
+    }
+  },
+  "refund_review": {
+    "rules": [
+      {
+        "id": "refund.amount.requires_human_review",
+        "description": "Refunds above the automatic threshold require HITL review.",
+        "effect": "require_human_review",
+        "when": {
+          "amount_gt": 500
+        }
+      },
+      {
+        "id": "refund.risk_score.requires_human_review",
+        "description": "High risk scores require HITL review.",
+        "effect": "require_human_review",
+        "when": {
+          "risk_score_gte": 40
+        }
+      },
+      {
+        "id": "refund.high_risk_level.requires_human_review",
+        "description": "High risk level always requires HITL review.",
+        "effect": "require_human_review",
+        "when": {
+          "risk_level_in": ["high"]
+        }
+      },
+      {
+        "id": "refund.fraud_flag.requires_human_review",
+        "description": "Users marked with fraud flag require HITL review.",
+        "effect": "require_human_review",
+        "when": {
+          "user_history_fraud_flag": true
+        }
+      }
+    ]
+  },
+  "permission_request_review": {
+    "rules": [
+      {
+        "id": "permission.admin.requires_human_review",
+        "description": "Admin-like permissions require manual review.",
+        "effect": "require_human_review",
+        "when": {
+          "permission_level_in": ["admin", "owner", "write", "approve"]
+        }
+      },
+      {
+        "id": "permission.sensitive_system.requires_human_review",
+        "description": "Sensitive systems require security or manager approval.",
+        "effect": "require_human_review",
+        "when": {
+          "system_in": ["finance", "prod", "production", "database", "db", "crm"]
+        }
+      }
+    ]
+  },
+  "reimbursement_review": {
+    "rules": [
+      {
+        "id": "reimbursement.amount.requires_human_review",
+        "description": "Large reimbursements require manager approval.",
+        "effect": "require_human_review",
+        "when": {
+          "amount_gt": 1000
+        }
+      },
+      {
+        "id": "reimbursement.category.requires_finance_review",
+        "description": "Travel, hotel, and entertainment expenses require finance review.",
+        "effect": "require_human_review",
+        "when": {
+          "category_in": ["travel", "hotel", "entertainment", "差旅", "住宿", "招待"]
+        }
+      }
+    ]
+  }
+}

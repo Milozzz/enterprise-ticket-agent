@@ -194,7 +194,7 @@ async def chat_with_agent(
 
             # 首包 SSE：把 trace_id 发给前端，让它能在 UI 展示
             yield _sse("meta", {"trace_id": trace_id, "thread_id": thread_id})
-            yield _sse("text", {"content": "已收到请求，正在查询订单并评估风险...\n\n"})
+            yield _sse("text", {"content": "已收到请求，Supervisor 正在选择业务场景并准备执行...\n\n"})
 
             from app.agent.state_machine import RefundState
             _refund_state = RefundState.CREATED
@@ -211,9 +211,11 @@ async def chat_with_agent(
                 logger.debug("langgraph_event", event_type=event_type, event_name=event_name)
 
                 _NODE_NAMES = {
+                             "supervisor_router",
                              "classify_intent", "lookup_order", "check_risk",
                              "fetch_user_history",
                              "human_review", "execute_refund", "send_notification",
+                             "permission_request", "reimbursement",
                              "answer_node", "answer_policy_node", "summarize_session",
                          }
 
@@ -693,7 +695,7 @@ def _build_summary(state) -> str:
     intent = get_state_val(state, "intent", "refund")
 
     # query_order / query_policy / other 意图：reply_text 已在 on_chain_end 实时发出，此处无需重复
-    if intent in ("query_order", "query_policy", "other"):
+    if intent in ("query_order", "query_policy", "other", "permission_request", "reimbursement"):
         return ""
 
     # refund 意图

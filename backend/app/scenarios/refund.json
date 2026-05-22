@@ -1,0 +1,42 @@
+{
+  "id": "refund",
+  "name": "Refund Support",
+  "description": "Existing refund, order lookup, risk control, HITL approval, and notification workflow.",
+  "workflow": "refund_workflow",
+  "status": "active",
+  "owner": "Customer Operations",
+  "business_domain": "After-sales",
+  "logic_module": "app.agent.nodes.classifier.classify_intent_node",
+  "logic_file": "backend/app/agent/graph.py",
+  "sla_minutes": 30,
+  "tags": ["HITL", "Risk Control", "Refund"],
+  "intents": ["refund", "query_order", "query_policy", "track_logistics", "escalate", "other"],
+  "keywords": [
+    "退款",
+    "退货",
+    "退钱",
+    "订单",
+    "物流",
+    "政策",
+    "规则",
+    "refund",
+    "order",
+    "policy"
+  ],
+  "allowed_roles": ["USER", "AGENT", "MANAGER"],
+  "tools": ["lookup_order", "check_risk_level", "execute_refund", "send_notification"],
+  "policies": ["refund_review"],
+  "hitl": {
+    "enabled": true,
+    "review_roles": ["MANAGER"],
+    "description": "High-risk refunds are interrupted before execution and wait for manager approval.",
+    "approval_chain": [
+      {
+        "id": "manager_review",
+        "name": "Manager review",
+        "roles": ["MANAGER"],
+        "required": true
+      }
+    ]
+  }
+}

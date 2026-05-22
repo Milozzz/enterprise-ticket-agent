@@ -88,6 +88,24 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ApprovalDecision(Base):
+    __tablename__ = "approval_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    scenario_id: Mapped[str] = mapped_column(String(80), index=True)
+    approval_type: Mapped[str] = mapped_column(String(80), index=True)
+    action: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20))
+    reviewer_id: Mapped[str] = mapped_column(String(100))
+    reviewer_role: Mapped[str] = mapped_column(String(50))
+    review_roles: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    comment: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    thread_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    policy_event: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class UserMemory(Base):
     """
     用户跨会话记忆表 — 持久化风控相关的用户画像

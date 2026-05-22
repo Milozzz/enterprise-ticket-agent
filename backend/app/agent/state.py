@@ -42,6 +42,18 @@ class AgentState(TypedDict, total=False):
     user_role: str  # 注入当前用户角色 (AGENT/MANAGER/USER)
     thread_id: str  # LangGraph thread_id，供节点生成 ApprovalPanel 时传回前端
     trace_id: str   # 端到端追踪 ID，由前端生成，贯穿 UI / DB / Langfuse 三处
+    scenario_id: str
+    scenario_name: str
+    supervisor_decision: dict
+    business_request: dict
+    approval_type: str
+    approval_required: bool
+    permission_system: str
+    permission_level: str
+    reimbursement_amount: float
+    reimbursement_category: str
+    tool_gateway_events: Annotated[list, operator.add]
+    policy_events: Annotated[list, operator.add]
     # RAG 政策检索结果（answer_policy_node 填充）
     policy_results: list
     policy_citations: list

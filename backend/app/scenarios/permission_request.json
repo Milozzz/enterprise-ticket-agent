@@ -1,0 +1,135 @@
+{
+  "id": "permission_request",
+  "name": "Permission Request",
+  "description": "Enterprise access request workflow for systems, roles, RBAC scopes, and approval requirements.",
+  "workflow": "permission_request_workflow",
+  "status": "active",
+  "owner": "Security & IT",
+  "business_domain": "Access Governance",
+  "logic_module": "app.agent.nodes.permission_request.permission_request_node",
+  "logic_file": "backend/app/agent/nodes/permission_request.py",
+  "sla_minutes": 60,
+  "tags": ["RBAC", "Approval", "Security"],
+  "intents": ["permission_request"],
+  "keywords": [
+    "申请权限",
+    "开通权限",
+    "访问权限",
+    "权限申请",
+    "管理员权限",
+    "审批权限",
+    "系统权限",
+    "rbac",
+    "access request",
+    "permission"
+  ],
+  "allowed_roles": ["USER", "AGENT", "MANAGER"],
+  "tools": ["create_permission_request"],
+  "policies": ["permission_request_review"],
+  "hitl": {
+    "enabled": true,
+    "review_roles": ["MANAGER", "SECURITY"],
+    "description": "Privileged, production, or finance access requires human approval.",
+    "approval_chain": [
+      {
+        "id": "manager_review",
+        "name": "Manager review",
+        "roles": ["MANAGER"],
+        "required": true
+      },
+      {
+        "id": "security_review",
+        "name": "Security review",
+        "roles": ["SECURITY"],
+        "required": true
+      }
+    ]
+  },
+  "runtime": {
+    "schema_version": "2",
+    "approval_type": "permission_request",
+    "current_step": "permission_request_done",
+    "slot_extraction": {
+      "fields": {
+        "system": {
+          "type": "keyword_map",
+          "default": "unknown_system",
+          "fallback_regex": "(?:申请|开通|访问)\\s*([A-Za-z0-9_-]{2,})\\s*(?:权限|access)?",
+          "patterns": [
+            { "value": "GitHub", "keywords": ["github", "gitlab", "代码仓库", "仓库"] },
+            { "value": "Jira", "keywords": ["jira", "工单系统"] },
+            { "value": "CRM", "keywords": ["crm", "客户系统"] },
+            { "value": "Finance", "keywords": ["finance", "财务", "报销系统"] },
+            { "value": "Production Database", "keywords": ["生产库", "数据库", "db", "database", "prod", "production"] }
+          ]
+        },
+        "permission_level": {
+          "type": "keyword_enum",
+          "default": "read",
+          "options": [
+            { "value": "admin", "keywords": ["管理员", "admin", "owner", "超级"] },
+            { "value": "approve", "keywords": ["审批", "approve", "approval"] },
+            { "value": "write", "keywords": ["写入", "编辑", "修改", "write", "edit"] }
+          ]
+        },
+        "reason": {
+          "type": "message_excerpt",
+          "max_length": 500,
+          "default": "No reason provided."
+        }
+      }
+    },
+    "tool": {
+      "name": "create_permission_request",
+      "args": {
+        "system": "$slots.system",
+        "permission_level": "$slots.permission_level",
+        "reason": "$slots.reason",
+        "requester_id": "$context.user_id"
+      }
+    },
+    "policy": {
+      "name": "permission_request_review",
+      "args": {
+        "system": "$slots.system",
+        "permission_level": "$slots.permission_level"
+      }
+    },
+    "approval_messages": {
+      "requires_human": "该权限涉及高风险范围，已进入主管/安全审批。",
+      "auto": "该权限属于低风险范围，可按自动审批策略继续处理。"
+    },
+    "reply_template": "权限申请已创建。\n\n申请单号：{request.requestId}\n目标系统：{slots.system}\n权限级别：{slots.permission_level}\n策略结果：{approval_line}",
+    "state_outputs": {
+      "permission_system": "$slots.system",
+      "permission_level": "$slots.permission_level"
+    },
+    "ui": {
+      "thinking_stream": {
+        "step": "permission_request_created",
+        "label": "权限申请",
+        "detail": "{slots.system} / {slots.permission_level} 已完成策略判定"
+      },
+      "business_request_card": {
+        "title": "权限申请单",
+        "summary": "Supervisor 已将用户请求路由到权限申请场景，并通过 Tool Gateway 创建企业权限申请记录。",
+        "fields": [
+          { "label": "目标系统", "value": "$slots.system" },
+          { "label": "权限级别", "value": "$slots.permission_level", "tone": "warning" },
+          { "label": "申请人", "value": "$context.user_id" },
+          { "label": "处理状态", "value": "$request.status", "tone": "warning" }
+        ],
+        "timeline": [
+          { "label": "Supervisor 场景路由", "status": "completed", "description": "命中 permission_request workflow" },
+          { "label": "Tool Gateway 创建申请", "status": "completed", "description": "执行 create_permission_request 工具" },
+          { "label": "HITL 审批判定", "status": "current", "description": "高权限或敏感系统需要主管/安全角色审批" }
+        ]
+      },
+      "approval_panel": {
+        "title": "权限申请审批",
+        "approve_label": "批准权限",
+        "reject_label": "拒绝申请"
+      }
+    }
+  }
+}

@@ -5,6 +5,7 @@
 
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
+from app.agent.tool_gateway import execute_tool, gateway_context_from_state
 from app.agent.tools.notification_tools import send_notification
 from app.agent.tools.notification_tools import _idempotency_key
 from app.core.config import get_settings
@@ -62,13 +63,22 @@ async def send_notification_node(state: AgentState) -> dict:
                 "ui_events": [ui_thinking],
             }
 
-        notif_data = send_notification.invoke({
+        notification_args = {
             "to_email": finance_email,
             "order_id": order_id,
             "refund_amount": get_state_val(state, "order_amount", 0),
             "refund_id": refund_id,
             "ticket_id": get_state_val(state, "ticket_id", ""),
-        })
+        }
+        gateway_result = execute_tool(
+            "send_notification",
+            notification_args,
+            context=gateway_context_from_state(state, actor_role="AGENT"),
+            handler=send_notification,
+        )
+        if not gateway_result.success:
+            raise RuntimeError(gateway_result.error or "send_notification failed")
+        notif_data = gateway_result.data
 
         logger.info("notification_sent", email_id=notif_data.get("email_id"))
 
@@ -101,6 +111,7 @@ async def send_notification_node(state: AgentState) -> dict:
             "is_completed": True,
             "current_step": "completed",
             "idempotency_key": notify_key,
+            "tool_gateway_events": [gateway_result.audit_event],
             "ui_events": [ui_thinking, ui_email],
         }
 

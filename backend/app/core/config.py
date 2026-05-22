@@ -66,6 +66,9 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./ticket.db"
+    # Set this to a mounted persistent directory in production. When empty, the
+    # platform uses the bundled repo scenarios.
+    scenario_config_dir: str = ""
     # Day 18：设为 true 时模拟数据库不可用，聊天流返回友好文案而非异常栈
     simulate_database_down: bool = False
     # database_url: str = "postgresql+asyncpg://ticketuser:ticketpass@localhost:5432/ticketdb"

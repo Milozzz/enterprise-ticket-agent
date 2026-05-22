@@ -6,6 +6,7 @@
 import uuid
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
+from app.agent.tool_gateway import execute_tool, gateway_context_from_state
 from app.agent.tools.refund_tools import execute_refund
 from app.core.idempotency import acquire_idempotency_key, release_idempotency_key, stable_idempotency_key
 from app.core.logging import get_logger
@@ -120,11 +121,20 @@ async def execute_refund_node(state: AgentState) -> dict:
                 "ui_events": [ui_thinking],
             }
 
-        refund_data = execute_refund.invoke({
+        refund_args = {
             "order_id": order_id,
             "amount": amount,
             "ticket_id": ticket_id,
-        })
+        }
+        gateway_result = execute_tool(
+            "execute_refund",
+            refund_args,
+            context=gateway_context_from_state(state, actor_role="AGENT"),
+            handler=execute_refund,
+        )
+        if not gateway_result.success:
+            raise RuntimeError(gateway_result.error or "execute_refund failed")
+        refund_data = gateway_result.data
 
         logger.info(
             "refund_executed",
@@ -195,6 +205,7 @@ async def execute_refund_node(state: AgentState) -> dict:
             "refund_message": refund_data.get("message", ""),
             "current_step": "execute_refund_done",
             "idempotency_key": idem_key,
+            "tool_gateway_events": [gateway_result.audit_event],
             "ui_events": [ui_thinking, ui_timeline],
         }
 

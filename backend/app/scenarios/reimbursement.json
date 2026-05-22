@@ -1,0 +1,130 @@
+{
+  "id": "reimbursement",
+  "name": "Reimbursement",
+  "description": "Employee expense reimbursement workflow with amount/category extraction, policy gates, and approval routing.",
+  "workflow": "reimbursement_workflow",
+  "status": "active",
+  "owner": "Finance",
+  "business_domain": "Expense Management",
+  "logic_module": "app.agent.nodes.reimbursement.reimbursement_node",
+  "logic_file": "backend/app/agent/nodes/reimbursement.py",
+  "sla_minutes": 120,
+  "tags": ["Finance", "Expense", "Approval"],
+  "intents": ["reimbursement"],
+  "keywords": [
+    "报销",
+    "费用报销",
+    "差旅费",
+    "交通费",
+    "住宿费",
+    "发票",
+    "expense",
+    "reimbursement",
+    "invoice"
+  ],
+  "allowed_roles": ["USER", "AGENT", "MANAGER"],
+  "tools": ["create_reimbursement_request"],
+  "policies": ["reimbursement_review"],
+  "hitl": {
+    "enabled": true,
+    "review_roles": ["MANAGER", "FINANCE"],
+    "description": "Large or sensitive expense categories require manager or finance approval.",
+    "approval_chain": [
+      {
+        "id": "manager_review",
+        "name": "Manager review",
+        "roles": ["MANAGER"],
+        "required": true
+      },
+      {
+        "id": "finance_review",
+        "name": "Finance review",
+        "roles": ["FINANCE"],
+        "required": true
+      }
+    ]
+  },
+  "runtime": {
+    "schema_version": "2",
+    "approval_type": "reimbursement",
+    "current_step": "reimbursement_done",
+    "slot_extraction": {
+      "fields": {
+        "amount": {
+          "type": "amount",
+          "default": 0,
+          "regex": "(?:¥|￥)?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:元|块|rmb|cny)?"
+        },
+        "category": {
+          "type": "keyword_map",
+          "default": "general",
+          "patterns": [
+            { "value": "travel", "keywords": ["差旅", "出差", "机票", "火车", "travel"] },
+            { "value": "hotel", "keywords": ["住宿", "酒店", "hotel"] },
+            { "value": "taxi", "keywords": ["打车", "出租", "网约车", "taxi"] },
+            { "value": "meal", "keywords": ["餐", "饭", "meal"] },
+            { "value": "office", "keywords": ["办公", "耗材", "office"] },
+            { "value": "entertainment", "keywords": ["招待", "客户接待", "entertainment"] }
+          ]
+        },
+        "description": {
+          "type": "message_excerpt",
+          "max_length": 500,
+          "default": "No description provided."
+        }
+      }
+    },
+    "tool": {
+      "name": "create_reimbursement_request",
+      "args": {
+        "amount": "$slots.amount",
+        "category": "$slots.category",
+        "description": "$slots.description",
+        "requester_id": "$context.user_id"
+      }
+    },
+    "policy": {
+      "name": "reimbursement_review",
+      "args": {
+        "amount": "$slots.amount",
+        "category": "$slots.category"
+      }
+    },
+    "approval_messages": {
+      "requires_human": "金额或类别触发审批策略，已进入主管/财务复核。",
+      "auto": "未触发高风险规则，可按自动审批策略继续处理。"
+    },
+    "reply_template": "报销申请已创建。\n\n报销单号：{request.requestId}\n金额：{slots.amount}\n类别：{slots.category}\n策略结果：{approval_line}",
+    "state_outputs": {
+      "reimbursement_amount": "$slots.amount",
+      "reimbursement_category": "$slots.category"
+    },
+    "ui": {
+      "thinking_stream": {
+        "step": "reimbursement_created",
+        "label": "报销申请",
+        "detail": "¥{slots.amount} / {slots.category} 已完成策略判定"
+      },
+      "business_request_card": {
+        "title": "报销申请单",
+        "summary": "Supervisor 已将用户请求路由到报销场景，并通过 Tool Gateway 创建企业报销申请记录。",
+        "fields": [
+          { "label": "报销金额", "value": "$slots.amount", "format": "currency_cny", "tone": "warning" },
+          { "label": "费用类别", "value": "$slots.category" },
+          { "label": "申请人", "value": "$context.user_id" },
+          { "label": "处理状态", "value": "$request.status", "tone": "warning" }
+        ],
+        "timeline": [
+          { "label": "Supervisor 场景路由", "status": "completed", "description": "命中 reimbursement workflow" },
+          { "label": "Tool Gateway 创建申请", "status": "completed", "description": "执行 create_reimbursement_request 工具" },
+          { "label": "财务/主管审批判定", "status": "current", "description": "高金额或敏感费用类别需要人工复核" }
+        ]
+      },
+      "approval_panel": {
+        "title": "报销申请审批",
+        "approve_label": "批准报销",
+        "reject_label": "拒绝报销"
+      }
+    }
+  }
+}

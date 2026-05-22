@@ -31,6 +31,8 @@ const ApprovalPanel = dyn(() => import("@/components/generative/ApprovalPanel"))
 const RiskAlert = dyn(() => import("@/components/generative/RiskAlert"));
 const RefundTimeline = dyn(() => import("@/components/generative/RefundTimeline"));
 const EmailPreview = dyn(() => import("@/components/generative/EmailPreview"));
+const BusinessRequestCard = dyn(() => import("@/components/generative/BusinessRequestCard"));
+const GenericApprovalPanel = dyn(() => import("@/components/generative/GenericApprovalPanel"));
 
 export default function ChatPage() {
   const { currentRole, currentUserId } = useAuthStore();
@@ -144,6 +146,8 @@ export default function ChatPage() {
       case "RiskAlert":           inner = <RiskAlert data={p} />; break;
       case "RefundTimeline":      inner = <RefundTimeline data={p} />; break;
       case "EmailPreview":        inner = <EmailPreview data={p} />; break;
+      case "BusinessRequestCard": inner = <BusinessRequestCard {...p} />; break;
+      case "GenericApprovalPanel": inner = <GenericApprovalPanel {...p} />; break;
       default:                    inner = null;
     }
     if (inner == null) return null;

@@ -7,9 +7,11 @@ import asyncio
 
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
+from app.agent.tool_gateway import execute_tool, gateway_context_from_state
 from app.agent.tools.refund_tools import check_risk_level
 from app.core.idempotency import acquire_idempotency_key, stable_idempotency_key
 from app.core.logging import get_logger
+from app.core.policy import evaluate_refund_review_policy
 from app.db.database import AsyncSessionLocal
 from app.db.models import Ticket, TicketStatus, User, UserRole, UserMemory
 from sqlalchemy import select
@@ -138,12 +140,21 @@ async def check_risk_node(state: AgentState) -> dict:
     }
 
     try:
-        risk_data = check_risk_level.invoke({
+        risk_args = {
             "order_id": get_state_val(state, "order_id", ""),
             "amount": get_state_val(state, "order_amount", 0),
             "user_id": get_state_val(state, "user_id", "unknown"),
             "reason": get_state_val(state, "refund_reason", "other"),
-        })
+        }
+        gateway_result = execute_tool(
+            "check_risk_level",
+            risk_args,
+            context=gateway_context_from_state(state, actor_role="AGENT"),
+            handler=check_risk_level,
+        )
+        if not gateway_result.success:
+            raise RuntimeError(gateway_result.error or "check_risk_level failed")
+        risk_data = gateway_result.data
 
         # 读取跨会话用户记忆，补充风控评分
         user_id = get_state_val(state, "user_id", "unknown")
@@ -172,6 +183,19 @@ async def check_risk_node(state: AgentState) -> dict:
         risk_score = risk_data.get("riskScore", 0)
         if risk_score >= 50:
             risk_data["autoApprove"] = False
+
+        review_policy = evaluate_refund_review_policy(
+            amount=get_state_val(state, "order_amount", 0),
+            risk_score=risk_data.get("riskScore", 0),
+            risk_level=risk_data.get("riskLevel", "low"),
+            user_history=user_mem,
+        )
+        risk_data["policyDecision"] = review_policy.to_audit_event()
+        if review_policy.requires_human_review:
+            risk_data["autoApprove"] = False
+            risk_data.setdefault("reasons", []).append(
+                f"Policy-as-Code: {', '.join(review_policy.matched_rules)}"
+            )
 
         requires_human = not risk_data.get("autoApprove", True)
 
@@ -228,6 +252,8 @@ async def check_risk_node(state: AgentState) -> dict:
             "risk_reasons": risk_data.get("reasons", []),
             "requires_human_approval": requires_human,
             "current_step": "check_risk_done",
+            "tool_gateway_events": [gateway_result.audit_event],
+            "policy_events": [review_policy.to_audit_event()],
             "ui_events": events,
         }
 
