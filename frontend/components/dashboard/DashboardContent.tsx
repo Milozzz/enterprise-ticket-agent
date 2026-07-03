@@ -23,7 +23,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn, formatCurrency } from "@/lib/utils";
-import type { DashboardStats, NodeLatencyStat } from "@/types";
+import type { DashboardStats, LlmCostReport, NodeLatencyStat } from "@/types";
 import {
   Activity,
   AlertTriangle,
@@ -31,6 +31,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   Clock,
+  DollarSign,
   GitBranch,
   RefreshCw,
   Search,
@@ -106,6 +107,7 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
   const [replayThreadId, setReplayThreadId] = useState<string | null>(null);
   const [failedTraces, setFailedTraces] = useState<FailedTrace[]>([]);
   const [nodeLatency, setNodeLatency] = useState<NodeLatencyStat[]>([]);
+  const [llmCosts, setLlmCosts] = useState<LlmCostReport | null>(null);
 
   useEffect(() => {
     fetch("/api/dashboard/failed-traces")
@@ -116,6 +118,11 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
     fetch("/api/dashboard/node-latency")
       .then((r) => r.json())
       .then(setNodeLatency)
+      .catch(() => {});
+
+    fetch("/api/dashboard/llm-costs?days=7")
+      .then((r) => r.json())
+      .then(setLlmCosts)
       .catch(() => {});
   }, []);
 
@@ -367,6 +374,59 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
                     <span className="ml-2">tokens {n.total_tokens ?? 0}</span>
                   </div>
                 ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {llmCosts && (
+          <Card className="border-slate-200/80 shadow-sm ring-1 ring-black/[0.04]">
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <DollarSign className="h-4 w-4 text-slate-500" />
+                <CardTitle className="text-base">模型用量与成本（近 7 天）</CardTitle>
+                <Badge variant="outline" className="ml-auto text-[10px]">可配置估算</Badge>
+              </div>
+              <CardDescription>
+                {llmCosts.totals.calls ?? 0} 次调用 · {(llmCosts.totals.total_tokens ?? 0).toLocaleString()} tokens ·
+                估算 ${(llmCosts.totals.estimated_cost_usd ?? 0).toFixed(6)}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-6 lg:grid-cols-[minmax(0,1.5fr)_minmax(260px,1fr)]">
+              <div className="h-64 min-w-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={llmCosts.daily} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" className="stroke-slate-200" />
+                    <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} />
+                    <Tooltip
+                      formatter={(value: number, name: string) => [
+                        name === "estimated_cost_usd" ? `$${Number(value).toFixed(6)}` : Number(value).toLocaleString(),
+                        name === "estimated_cost_usd" ? "估算成本" : "Token",
+                      ]}
+                    />
+                    <Bar dataKey="total_tokens" name="total_tokens" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-700">高成本会话</p>
+                {llmCosts.sessions.length === 0 ? (
+                  <p className="text-sm text-slate-500">暂无模型调用记录</p>
+                ) : llmCosts.sessions.slice(0, 6).map((session) => (
+                  <div key={session.thread_id} className="flex items-center justify-between gap-3 border-b border-slate-100 py-2 text-xs">
+                    <span className="min-w-0 truncate font-mono text-slate-600" title={session.thread_id}>
+                      {session.thread_id}
+                    </span>
+                    <span className="shrink-0 text-right tabular-nums text-slate-900">
+                      ${session.estimated_cost_usd.toFixed(6)}
+                      <span className="ml-2 text-slate-400">{session.total_tokens.toLocaleString()} tok</span>
+                    </span>
+                  </div>
+                ))}
+                <p className="pt-1 text-[11px] text-slate-500">
+                  Failover {llmCosts.totals.fallback_calls ?? 0} 次 · 失败 {llmCosts.totals.failed_calls ?? 0} 次
+                </p>
               </div>
             </CardContent>
           </Card>

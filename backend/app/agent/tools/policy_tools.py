@@ -1,8 +1,8 @@
 """
-退款政策知识库工具 — 混合 RAG 实现
+政策知识库工具 — 混合 RAG 的确定性降级层
 
-优先使用 pgvector + text-embedding-004 做语义检索（需要 PostgreSQL + GOOGLE_API_KEY）。
-降级策略：pgvector 不可用时回退到 numpy TF-IDF（无需外部依赖）。
+在线主路径由 ``app.agent.rag_service`` 使用 pgvector + text-embedding-004。
+本模块提供 60 条内置语料和 numpy TF-IDF 降级（无需外部依赖）。
 
 【升级原因】
 - pgvector：语义相似度远优于字符级 bigram，能处理同义词和语义变体
@@ -13,15 +13,14 @@
 from __future__ import annotations
 
 import re
-import os
-import json
-import hashlib
-from typing import NamedTuple
+from dataclasses import dataclass
 
 import numpy as np
 from langchain_core.tools import tool
 
-# ── 退款政策知识库（10 条）────────────────────────────────────────────────────
+from app.agent.policy_corpus import EXTENDED_POLICY_DOCS
+
+# ── 核心退款政策（10 条；后续追加 50 条企业政策）────────────────────────────
 POLICY_DOCS = [
     {
         "id": "P001",
@@ -124,68 +123,21 @@ POLICY_DOCS = [
     },
 ]
 
+# The ten refund clauses above remain stable IDs used by older tests and demo
+# links.  Fifty additional enterprise clauses make the corpus representative
+# enough for retrieval and recall evaluation.
+POLICY_DOCS.extend(EXTENDED_POLICY_DOCS)
 
-class PolicyResult(NamedTuple):
+
+@dataclass(frozen=True)
+class PolicyResult:
     policy_id: str
     title: str
     content: str
     score: float
-
-
-# ── pgvector 语义检索（主路径）────────────────────────────────────────────────
-
-_embedding_cache: dict[str, list[float]] = {}  # 内存缓存，避免重复 API 调用
-_policy_embeddings: list[list[float]] | None = None
-
-
-def _get_embedding(text: str) -> list[float]:
-    """调用 Google text-embedding-004 获取 embedding 向量（带缓存）"""
-    cache_key = hashlib.md5(text.encode()).hexdigest()
-    if cache_key in _embedding_cache:
-        return _embedding_cache[cache_key]
-
-    from app.core.config import get_settings
-    settings = get_settings()
-    if not settings.google_api_key:
-        raise ValueError("GOOGLE_API_KEY 未配置，无法使用语义检索")
-
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-    embedder = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=settings.google_api_key,
-    )
-    vec = embedder.embed_query(text)
-    _embedding_cache[cache_key] = vec
-    return vec
-
-
-def _cosine_sim(a: list[float], b: list[float]) -> float:
-    va, vb = np.array(a), np.array(b)
-    denom = np.linalg.norm(va) * np.linalg.norm(vb)
-    return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
-
-
-def _search_pgvector(query: str, top_k: int = 2) -> list[PolicyResult]:
-    """使用 text-embedding-004 做语义检索（需要 GOOGLE_API_KEY）"""
-    global _policy_embeddings
-
-    # 懒加载：首次调用时批量 embed 所有政策文档
-    if _policy_embeddings is None:
-        _policy_embeddings = [_get_embedding(doc["content"]) for doc in POLICY_DOCS]
-
-    query_vec = _get_embedding(query)
-    scores = [_cosine_sim(query_vec, doc_vec) for doc_vec in _policy_embeddings]
-    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-
-    return [
-        PolicyResult(
-            policy_id=POLICY_DOCS[i]["id"],
-            title=POLICY_DOCS[i]["title"],
-            content=POLICY_DOCS[i]["content"],
-            score=round(scores[i], 4),
-        )
-        for i in top_indices
-    ]
+    paragraph_id: str = ""
+    source: str = "POLICY_DOCS"
+    retrieval_method: str = "tfidf"
 
 
 # ── TF-IDF 降级路径（无需任何外部依赖）──────────────────────────────────────
@@ -230,6 +182,9 @@ def _search_tfidf(query: str, top_k: int = 2) -> list[PolicyResult]:
             title=POLICY_DOCS[i]["title"],
             content=POLICY_DOCS[i]["content"],
             score=round(scores[i], 4),
+            paragraph_id=f"{POLICY_DOCS[i]['id']}#p1",
+            source=str(POLICY_DOCS[i].get("source") or "POLICY_DOCS"),
+            retrieval_method="tfidf",
         )
         for i in top_indices
     ]
@@ -241,14 +196,19 @@ def search_policy_raw(query: str, top_k: int = 2) -> list[PolicyResult]:
     """
     返回与 query 最相关的 top_k 条政策。
 
-    优先使用 text-embedding-004 语义检索（需要 GOOGLE_API_KEY）；
-    失败时自动降级为 TF-IDF 字符级 bigram 检索。
+    This synchronous API is the deterministic TF-IDF fallback used by tools,
+    tests, and CI.  Online Agent requests call ``retrieve_policy_chunks`` in
+    ``rag_service.py`` which prefers PostgreSQL pgvector and falls back here.
     """
-    try:
-        results = _search_pgvector(query, top_k)
-        return results
-    except Exception:
-        return _search_tfidf(query, top_k)
+    return _search_tfidf(query, top_k)
+
+
+def lexical_similarity(query: str, content: str) -> float:
+    """Small deterministic lexical score used by the optional reranker."""
+    vocab = _build_vocab([content])
+    if not vocab:
+        return 0.0
+    return float(np.dot(_vectorize(query, vocab), _vectorize(content, vocab)))
 
 
 @tool

@@ -1,862 +1,605 @@
-# Enterprise Ticket Agent — 企业级 AI 退款自动化系统
+# Enterprise Ticket Agent
 
-![CI](https://img.shields.io/badge/CI-ruff%20%7C%20pytest%20%7C%20evals%20%7C%20docker-brightgreen)
-![Docker Compose](https://img.shields.io/badge/Docker%20Compose-postgres%20%7C%20redis%20%7C%20backend%20%7C%20frontend-blue)
-![Agent Safety](https://img.shields.io/badge/Agent%20Safety-prompt%20injection%20%7C%20RBAC%20%7C%20PII-orange)
+一个面向企业业务流程的 **Configurable Supervisor-based Multi-scenario Agent Platform**。项目从单一“自动化退款 Agent”升级为可配置的多场景企业 Agent 平台，支持场景路由、配置化运行时、Tool Gateway、Policy-as-Code、多级 HITL 审批、RAG 政策问答、Simulation Lab、Eval 与链路观测。
 
-> 基于 LangGraph + Generative UI 的全栈企业退款工单系统，集成 Human-in-the-Loop 审批流、实时流式 UI、全链路可观测性与 RAG 政策问答。
+![CI](https://img.shields.io/badge/CI-pytest%20%7C%20eval%20%7C%20typecheck-brightgreen)
+![Agent](https://img.shields.io/badge/Agent-LangGraph%20%7C%20HITL%20%7C%20Supervisor-blue)
+![Governance](https://img.shields.io/badge/Governance-Policy--as--Code%20%7C%20Tool%20Gateway-orange)
 
----
+## Online Demo
 
-## 目录
+- Frontend: [https://enterprise-ticket-agent.vercel.app](https://enterprise-ticket-agent.vercel.app)
+- Backend health: [https://enterprise-ticket-agent-backend.onrender.com/health](https://enterprise-ticket-agent-backend.onrender.com/health)
 
-- [项目简介](#项目简介)
-- [系统架构](#系统架构)
-- [技术栈](#技术栈)
-- [模块详解](#模块详解)
-  - [Agent 核心层](#agent-核心层)
-  - [数据库层](#数据库层)
-  - [API 层](#api-层)
-  - [前端层](#前端层)
-- [核心设计决策](#核心设计决策)
-- [业务流程](#业务流程)
-- [测试体系](#测试体系)
-- [快速开始](#快速开始)
-- [环境变量配置](#环境变量配置)
-- [项目结构](#项目结构)
-- [可观测性与调试](#可观测性与调试)
-- [安全与权限](#安全与权限)
+Admin pages:
 
----
+- Scenario Studio: `/admin/scenarios`
+- Simulation Lab: `/admin/simulation`
+- Approval Center: `/admin/approvals`
+- Platform Capability Console: `/admin/platform`
+- ERP Connector Control Plane: `/admin/connectors`
+- Mini ERP Business Data: `/admin/business-data`
+- Master Data Governance: `/admin/master-data`
+- Observability Dashboard: `/dashboard`
 
-## 项目简介
+## What This Project Shows
 
-本项目是一个**面向企业的 AI 退款工单处理系统**，旨在用 AI Agent 自动化处理电商退款申请的完整业务流程，包括：
+这个项目重点展示的不是“调一个 LLM API”，而是企业 Agent 落地时更关键的工程能力：
 
-- 自然语言意图识别（支持中英文）
-- 订单数据查询与校验
-- 风险评分与自动/人工分流
-- Manager 角色审批高风险退款
-- 自动执行退款并发送财务通知邮件
-- 政策问答（基于 RAG）
+- **Supervisor 场景路由**：先由 supervisor 判断业务场景，再进入退款、权限申请、报销等不同 workflow。
+- **Configurable Runtime**：权限申请、报销场景通过 JSON 配置驱动 slot extraction、tool mapping、policy binding、UI template。
+- **Tool Gateway**：所有有副作用的工具调用统一经过权限、风险、幂等、审计边界。
+- **Policy-as-Code**：审批规则从代码逻辑中抽离，支持确定性治理和安全测试。
+- **Human-in-the-loop**：高风险动作进入人工审批，支持多级审批链和 `stageId`。
+- **Permission-aware RAG**：退款政策问答返回引用来源和政策条款 ID，降低幻觉。
+- **Replay / Observability**：每个节点写入 AuditLog，Dashboard 可查看 trace replay、节点耗时、失败率。
+- **Eval / Simulation Lab**：支持 golden cases、场景级 eval、配置 dry-run，降低发布风险。
+- **SAP OData Connector Runtime**：支持 Mock/Live、API Key/OAuth/Principal Propagation、CSRF、ETag、分页、超时重试、熔断和只读/Shadow 保护。
+- **财务 Saga**：退款执行覆盖贷项凭证、客户未清项清账，以及清账失败后的自动冲销补偿。
+- **MCP + A2A**：提供 MCP Streamable HTTP 工具调用端点和 A2A Agent Card/任务生命周期，外部 Agent 无法绕过 Tool Gateway 与 HITL。
+- **持续发布门禁**：自动检查 Policy fail-closed、工具策略覆盖、ERP 写操作审批/幂等、场景 Eval 与 SAP 连接状态。
+- **Model Gateway 与成本治理**：节点级 Gemini/OpenAI/Anthropic 路由、provider failover、统一结构化输出与会话/每日成本账本。
+- **Durable Approval Inbox**：待办队列、SLA 倒计时/超时升级、批量审批、审批意见和申请人/审批人双视图。
 
-系统的核心特点是**完全可审计**、**有状态可恢复**、**实时可视化**：每一步 Agent 决策都写入审计日志，通过 Graph 检查点实现进程重启后状态续传，前端通过 Server-Sent Events 实时渲染动态 UI 组件（Generative UI）。
+## Supported Scenarios
 
-### 当前工程状态
+| Scenario | Description | Runtime Style |
+| --- | --- | --- |
+| Refund | 订单退款、风控、自动退款或人工审批 | LangGraph workflow |
+| Permission Request | 企业系统/RBAC 权限申请 | Config-driven generic runtime |
+| Reimbursement | 报销申请、金额识别、财务审批 | Config-driven generic runtime |
+| Policy QA | 退款政策问答，返回 citations | RAG workflow |
 
-| 项目 | 状态 |
-|------|------|
-| 后端测试 | `139 passed` |
-| 规则引擎 Evals | `20/20` pass，Intent / Order-ID / Reason Accuracy 均为 `100%` |
-| CI 覆盖 | Ruff、Pytest、Rules-only Evals、Docker build check |
-| 本地运行 | Docker Compose 一键启动 PostgreSQL、Redis、FastAPI、Next.js |
+## Architecture
 
-### 部署证明
-
-| 项目 | 说明 |
-|------|------|
-| Docker Compose | `docker compose up --build` 会启动 PostgreSQL、Redis、Backend、Frontend，并在后端启动前执行 `alembic upgrade head && python seed.py` |
-| Seed Data | 自动写入 demo 用户、3 个订单、3 条工单、RefundLog 与 AuditLog 样本，Dashboard 首屏有数据 |
-| CI Badge | README 顶部展示 lint、pytest、evals、Docker build check 覆盖 |
-| Screenshots | [Dashboard Observability](docs/screenshots/dashboard-observability.svg)、[Agent Refund Flow](docs/screenshots/agent-refund-flow.svg) |
-
-线上部署推荐使用 Render + Vercel，步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。后端支持 Render Blueprint，前端支持 Vercel `frontend` 子目录部署。
-
----
-
-## 系统架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Frontend (Next.js 15)                  │
-│   ┌──────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│   │ Chat UI  │  │ Dashboard    │  │ Generative UI    │  │
-│   │ useChat  │  │ ChainReplay  │  │ OrderCard        │  │
-│   │ Zustand  │  │ Analytics    │  │ ApprovalPanel    │  │
-│   └────┬─────┘  └──────────────┘  │ RefundTimeline   │  │
-│        │ SSE / REST               │ RiskAlert        │  │
-└────────┼─────────────────────────────────────────────────┘
-         │
-┌────────▼─────────────────────────────────────────────────┐
-│                   Backend (FastAPI)                        │
-│   ┌───────────────────────────────────────────────────┐  │
-│   │              LangGraph Agent                       │  │
-│   │  classify → lookup → risk → [interrupt] →         │  │
-│   │  human_review → execute_refund → notification     │  │
-│   │  RAG policy: query_policy → answer_policy_node    │  │
-│   └───────────────────────────────────────────────────┘  │
-│   ┌──────────────┐  ┌──────────┐  ┌──────────────────┐  │
-│   │  Audit Trail  │  │ Langfuse │  │ State Machine    │  │
-│   │  (AuditLog)   │  │ Callback │  │ (9 States)       │  │
-│   └──────────────┘  └──────────┘  └──────────────────┘  │
-└──────────────────────────────┬───────────────────────────┘
-                               │
-         ┌─────────────────────┼─────────────────────┐
-         │                     │                     │
-┌────────▼──────┐   ┌──────────▼──────┐   ┌─────────▼──────┐
-│  PostgreSQL   │   │     Redis        │   │   Langfuse     │
-│  - Orders     │   │  - Cache         │   │   Cloud        │
-│  - Tickets    │   │  - Checkpoints   │   │  (Traces)      │
-│  - AuditLogs  │   │  - Sessions      │   │               │
-└───────────────┘   └─────────────────┘   └────────────────┘
+```mermaid
+flowchart LR
+  U[User] --> F[Next.js Frontend]
+  F --> B[FastAPI Backend]
+  B --> S[Supervisor Router]
+  S --> R1[Refund Workflow]
+  S --> R2[Generic Scenario Runtime]
+  R2 --> C[Scenario Config v2]
+  R1 --> TG[Tool Gateway]
+  R2 --> TG
+  TG --> P[Policy-as-Code]
+  P --> H[HITL Approval]
+  TG --> DB[(PostgreSQL)]
+  TG --> ERP[ERP Connector Runtime]
+  ERP --> SAP[SAP S/4HANA OData]
+  B --> MCP[MCP Streamable HTTP]
+  B --> A2A[A2A Agent Gateway]
+  B --> Redis[(Redis Checkpoint/Cache)]
+  B --> A[AuditLog + Replay]
+  B --> L[Langfuse]
+  F --> D[Dashboard / Simulation / Approval Center]
 ```
 
----
+## Core Workflow
 
-## 技术栈
+1. 前端通过 SSE 调用 `/api/chat`。
+2. 后端 LangGraph 进入 `supervisor_router`。
+3. Supervisor 根据场景配置和 fallback router 选择 workflow。
+4. Runtime 执行 slot extraction、Tool Gateway、Policy-as-Code。
+5. 低风险动作自动处理，高风险动作进入 HITL 审批。
+6. 所有节点输出 UI event、AuditLog、trace metadata。
+7. Dashboard 可以按 `thread_id` 回放完整执行链路。
 
-### 后端
+## Tech Stack
 
-| 技术 | 用途 | 选型理由 |
-|------|------|---------|
-| **FastAPI** | HTTP 框架 | 原生异步、自动 OpenAPI 文档、Pydantic 深度集成，适合 SSE 流式响应 |
-| **LangGraph** | Agent 编排 | 显式状态机图结构，支持 `interrupt_before` 人工介入，检查点持久化；相比 ReAct/AutoGPT 等方案，执行路径完全透明可审计，满足企业合规要求 |
-| **Google Gemini 2.0 Flash** | LLM | 高性价比、结构化 JSON 输出稳定、中文理解能力强 |
-| **LangChain** | LLM 工具层 | 标准化 Tool 接口、消息格式、Callback 系统，与 LangGraph 深度集成 |
-| **SQLAlchemy 2.0 (async)** | ORM | 异步会话模式，配合 asyncpg 实现全链路非阻塞 DB 操作 |
-| **asyncpg** | PG 驱动 | 比 psycopg2 性能高 3-5x，纯异步，适合 FastAPI 并发场景 |
-| **Alembic** | 数据库迁移 | 与 SQLAlchemy 原生集成，支持版本化迁移，生产环境安全变更 |
-| **Redis 7** | 缓存 + 检查点 | 用于 LangGraph 状态检查点（Graph 暂停后进程重启仍可恢复）和响应缓存 |
-| **Upstash Redis** | Serverless 检查点 | 无服务器部署场景下替代本地 Redis，支持 HTTP 协议，无需长连接 |
-| **Langfuse** | 可观测性 | 记录每个节点的 token 用量、延迟、输入输出，支持全链路 trace 关联，生产环境成本分析必备 |
-| **NumPy** | 向量相似度 | 用于 TF-IDF + 余弦相似度实现轻量 RAG，10 条政策文档无需引入外部向量数据库 |
-| **structlog** | 结构化日志 | JSON 格式输出，便于 ELK/Loki 采集，避免非结构化日志难以检索 |
-| **Pydantic v2** | 数据验证 | 请求/响应模型自动校验，与 FastAPI 深度集成，类型安全 |
+| Layer | Stack |
+| --- | --- |
+| Agent Orchestration | LangGraph, LangChain |
+| Backend | FastAPI, Pydantic v2, SQLAlchemy async, Alembic |
+| Frontend | Next.js 15, React 19, Vercel AI SDK, Tailwind, shadcn/ui |
+| Data | PostgreSQL, Redis |
+| LLM / RAG | Provider-neutral Gateway (Gemini/OpenAI/Anthropic), pgvector, TF-IDF fallback, citations |
+| Observability | AuditLog, Dashboard replay, Langfuse |
+| Deployment | Docker Compose, Render, Vercel |
 
-### 前端
+## Quick Start
 
-| 技术 | 用途 | 选型理由 |
-|------|------|---------|
-| **Next.js 15 (App Router)** | 全栈框架 | Server Components、Route Handlers 充当 BFF 层，SSE 转发、协议适配与鉴权在服务端完成，避免前端直连后端泄露密钥 |
-| **React 19** | UI | 新的并发特性，配合 Generative UI 动态渲染运行时组件 |
-| **Vercel AI SDK v3** | 流式 AI 接入 | `useChat` hook 封装 SSE 流管理、重试、消息状态；`message_annotations` 机制传递 UI 组件指令 |
-| **Zustand** | 全局状态 | 轻量、无 Provider 包裹，用于 auth 角色切换场景 |
-| **Tailwind CSS v4** | 样式 | 原子类快速迭代，配合 shadcn/ui 实现一致的设计系统 |
-| **shadcn/ui** | 组件库 | 基于 Radix UI 的可访问性组件，代码直接 ingest 到项目，完全可定制 |
-| **Framer Motion** | 动画 | 流程图、时间线、状态指示器的动画效果，提升审批流程的可视化体验 |
-| **Recharts** | 图表 | Dashboard 数据可视化，响应式、声明式 API |
+### Docker Compose
 
-### 基础设施
+```bash
+git clone https://github.com/Milozzz/enterprise-ticket-agent.git
+cd enterprise-ticket-agent
 
-| 服务 | 用途 |
-|------|------|
-| **PostgreSQL 16 + pgvector** | 主数据库（pgvector 扩展预留，当前 RAG 用 NumPy） |
-| **Redis 7** | Agent 检查点持久化、API 响应缓存（TTL 300s） |
-| **Docker Compose** | 一键启动全栈（postgres、redis、backend、frontend） |
-| **Gmail SMTP** | 财务团队退款通知邮件（开发环境无配置则 mock 输出到控制台） |
+cp .env.example .env
+# Optional: fill GOOGLE_API_KEY / LANGFUSE keys / Gmail config
 
----
-
-## 模块详解
-
-### Agent 核心层
-
-#### `backend/app/agent/state.py` — 状态定义
-
-使用 LangGraph 的 `TypedDict` 定义全局 `AgentState`，所有节点共享同一状态对象，避免参数传递混乱。
-
-关键字段：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `messages` | `list` | LangChain 消息历史，使用 `add_messages` reducer 累加 |
-| `intent` | `str` | 分类结果：`refund` / `query_order` / `query_policy` / `other` |
-| `order_detail` | `dict` | 查询到的订单详情 |
-| `risk_score` | `int` | 风险评分 0-100 |
-| `requires_human_approval` | `bool` | 是否需要人工审批 |
-| `human_decision` | `str` | 审批决策：`approve` / `reject` |
-| `ui_events` | `list` | 待发送到前端的 UI 组件指令列表 |
-| `thread_id` | `str` | LangGraph 检查点 ID，每次对话唯一 |
-| `trace_id` | `str` | 贯穿前后端的全链路追踪 ID |
-
-#### `backend/app/agent/graph.py` — Agent 图编排
-
-用 LangGraph `StateGraph` 构建显式有向图，7 个节点通过条件路由连接：
-
-```
-classify_intent
-    │
-    ├─ intent=refund ──→ lookup_order ──→ check_risk
-    │                                          │
-    │                              risk低/中 ──┤── risk高 ──→ [INTERRUPT] ──→ human_review
-    │                                          │                                      │
-    │                                    execute_refund ←── approve ←────────────────┘
-    │                                          │         reject → END
-    │                                    send_notification
-    │                                          │
-    │                                         END
-    │
-    ├─ intent=query_policy ──→ answer_policy_node ──→ END
-    │
-    └─ intent=other/query_order ──→ answer_node ──→ END
+docker compose up --build
 ```
 
-**关键设计**：`interrupt_before=["human_review"]` 使图在高风险场景下自动暂停，序列化状态到检查点，等待前端 `/resume` 请求后续传。
+Open:
 
-#### `backend/app/agent/nodes/` — 各处理节点
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+- API Docs: `http://localhost:8000/docs`
 
-**`classifier.py`** — 意图与实体提取
-- **主策略**：调用 Gemini 2.0 Flash，结构化 JSON 输出，提取 intent、order_id、reason、user_description
-- **降级策略**：当 LLM 不可用时切换到正则规则引擎（支持"破损"、"发错"、"未收到"等中文关键词）
-- **解决的问题**：避免 LLM API 超时或限流时整个流程阻塞，生产环境必须有降级路径
+### Local Development
 
-**`order_lookup.py`** — 订单数据查询
-- 调用 `get_order_detail` Tool 查询 PostgreSQL
-- 生成 `order_card` UI 事件，前端实时渲染订单卡片（商品列表、金额、状态、收货地址）
-
-**`risk_check.py`** — 风险评分
-- 规则引擎：金额 > ¥500 触发人工审核标志；金额 > ¥1000 额外加分；特定用户 ID 有欺诈记录
-- 最终评分 0-100，低风险(<30) 自动审批，高风险(≥60) 强制人工
-- 在 DB 创建 Ticket 记录（状态 PENDING），生成 `risk_alert` + `approval_panel` UI 事件
-
-**`human_review.py`** — 人工审批节点
-- 该节点在 `interrupt_before` 配置下**从不被直接执行**，仅在图恢复后执行
-- 校验 `reviewer_role` 必须为 MANAGER（HTTP 403 拒绝普通用户）
-- 更新 Ticket 状态为 APPROVED / REJECTED，记录 operator_id
-
-**`refund.py`** — 退款执行
-- 调用 `execute_refund` Tool，生成唯一退款单号（REFUND_XXXXX）
-- 更新 Ticket 状态为 COMPLETED
-- 生成 `refund_timeline` UI 事件，展示四阶段退款进度
-
-**`notification.py`** — 财务通知
-- 调用 `send_notification` Tool，通过 Gmail SMTP 发送邮件
-- **幂等性保障**：同一 (order_id, refund_id) 组合不会重复发送邮件
-- 开发环境无 Gmail 配置时自动降级为控制台输出
-
-**`policy.py`** — 政策问答（RAG）
-- 调用 `search_policy_raw` Tool：基于 TF-IDF + 余弦相似度检索最相关的 2 条政策文档
-- 将政策原文作为上下文注入 Prompt，Gemini 生成有依据的回答，不凭空捏造
-
-#### `backend/app/agent/tools/` — Function Calling 工具集
-
-| 工具 | 功能 |
-|------|------|
-| `get_order_detail(order_id)` | 查询订单详情（商品、金额、状态、地址） |
-| `check_risk_level(order_id, amount, user_id, reason)` | 计算风险分 0-100，返回风险级别和原因列表 |
-| `execute_refund(order_id, amount, ticket_id)` | 执行退款（模拟支付网关），返回退款单号 |
-| `send_notification(to_email, order_id, amount, refund_id, ticket_id)` | 发送财务通知邮件（幂等） |
-| `get_ticket_status(order_id)` | 查询工单状态和时间线 |
-| `search_policy_raw(query, top_k=2)` | TF-IDF 检索退款政策文档 |
-
-#### `backend/app/agent/state_machine.py` — 业务状态机
-
-定义退款工单的 9 个业务状态及合法流转路径：
-
-```
-CREATED → CLASSIFIED → ORDER_LOADED → RISK_EVALUATED
-                                              │
-                              ┌───────────────┼───────────────┐
-                              ↓               ↓               ↓
-                          APPROVED      PENDING_APPROVAL   FAILED
-                              │               │
-                              ↓         (approve/reject)
-                          REFUNDED           │
-                              │         REJECTED (terminal)
-                              ↓
-                          COMPLETED (terminal)
-```
-
-非法状态流转（如从 REJECTED 跳到 REFUNDED）会抛出 `InvalidStateTransitionError`，保证业务流程完整性。
-
----
-
-### 数据库层
-
-#### `backend/app/db/models.py` — 数据模型
-
-**User** — 用户表
-```
-id | name | email | role(USER/AGENT/MANAGER) | created_at
-```
-
-**Order** — 订单表
-```
-id(string) | user_id(FK) | amount | status | items(JSON) | shipping_address | created_at | tracking_number
-```
-`items` 为 JSON 数组，每项包含商品 id、名称、图片 URL、数量、单价。
-
-**Ticket** — 退款工单表
-```
-id | order_id(FK) | requester_id(FK→User) | operator_id(FK→User, nullable)
-   | thread_id(indexed) | status(PENDING/APPROVED/REJECTED/COMPLETED)
-   | reason | created_at
-```
-`thread_id` 与 LangGraph 检查点 ID 一一对应，是连接 Agent 状态与业务工单的关键外键。
-
-**RefundLog** — 退款记录表
-```
-id | ticket_id(FK) | refund_id(unique) | amount | processed_at
-```
-
-**AuditLog** — 审计日志表
-```
-id | thread_id(indexed) | trace_id(indexed) | node_name | event_type
-   | input_data(JSON, 已脱敏) | output_data(JSON, 已脱敏)
-   | duration_ms | success | created_at
-```
-每个节点的执行都写入 AuditLog，支持按 thread_id 回放完整执行链。
-
----
-
-### API 层
-
-#### `backend/app/api/routes/chat.py`
-
-**`POST /api/agent/chat`** — 主 Agent 流式端点
-
-接收用户消息，启动 LangGraph 图执行，通过 Server-Sent Events 实时推送：
-
-```
-event: meta   → {trace_id, thread_id}         # 追踪 ID 元信息
-event: ui     → {type, props}                  # Generative UI 组件指令
-event: text   → {content: "..."}              # 流式文本
-event: done   → {}                            # 流结束
-```
-
-关键特性：
-- **Redis 缓存**：相同 (user_id, 消息内容) 的非退款查询命中缓存（TTL 300s），避免重复 LLM 调用
-- **Langfuse 追踪**：每个节点执行都通过 Callback Handler 上报到 Langfuse
-- **AuditLog 写入**：节点名称、耗时、输入输出（脱敏）、成功标志全量记录
-- **优雅降级**：DB 宕机返回用户友好提示，不暴露堆栈信息
-
-**`POST /api/agent/resume`** — 人工审批续传端点
-
-```json
-{
-  "thread_id": "xxx",
-  "action": "approve|reject",
-  "reviewer_id": "manager_001",
-  "reviewer_role": "MANAGER",
-  "comment": "金额合规，批准"
-}
-```
-
-- 校验 reviewer_role 必须为 MANAGER，否则 HTTP 403
-- 从 Redis/PostgreSQL 检查点恢复 Graph 状态，注入 `human_decision`，继续执行
-- **降级策略**：检查点丢失时直接操作数据库更新 Ticket 状态，并合成 UI 事件返回
-
-**`GET /api/agent/audit/{thread_id}`** — 审计日志查询
-
-**`GET /api/agent/replay/{thread_id}`** — 执行链回放数据（含节点耗时、状态快照）
-
-**`GET /api/agent/debug/{thread_id}`** — Agent 状态调试（开发环境）
-
----
-
-### 前端层
-
-#### `frontend/app/page.tsx` — 主对话界面
-
-- 左侧：聊天区域，使用 Vercel AI SDK `useChat` hook 管理流式消息
-- 右侧：实时审计日志面板（每 2 秒轮询）
-- 动态渲染 Generative UI 组件：根据后端推送的 `ui` 事件类型实例化对应 React 组件
-- 每次提交生成新 `thread_id`，保证检查点隔离
-
-#### `frontend/app/dashboard/page.tsx` — 运营仪表盘
-
-- 退款统计：总量、通过率、平均处理时长
-- **节点耗时图表**（新增）：可视化各 Agent 节点的 avg / P95 耗时，P95 > 3s 标红警告，直观定位性能瓶颈
-- **ChainReplay** 组件：可视化任意 thread 的节点执行时间线，展示各节点耗时、成功/失败、状态快照
-- 失败链路列表：快速定位 `success=false` 的异常执行
-
-#### `frontend/components/generative/` — Generative UI 组件集
-
-这是系统的核心创新点——后端节点通过 SSE 推送 `{type, props}` 指令，前端动态挂载对应 React 组件，实现**运行时 UI 组合**：
-
-| 组件 | 触发节点 | 功能 |
-|------|---------|------|
-| `AgentThinkingStream` | 所有节点 | 实时展示节点执行进度（分类→查询→风险→执行→通知），带动画状态指示器 |
-| `OrderCard` | `lookup_order` | 订单详情卡（商品列表、图片、金额、状态、收货地址） |
-| `RiskAlert` | `check_risk` | 风险评分展示（0-100 色阶）+ 风险原因列表 |
-| `ApprovalPanel` | `check_risk`（高风险） | Manager 审批面板，Approve/Reject 按钮 + 仿真回放动画（可调速 0.5x/1x/2x） |
-| `RefundTimeline` | `execute_refund` | 四阶段退款进度（提交→审批→处理→到账） |
-| `EmailPreview` | `send_notification` | 已发送财务邮件预览（收件人、主题、正文、时间戳） |
-
-#### `frontend/app/api/chat/route.ts` — SSE 协议适配器
-
-这是 Next.js Route Handler 充当 BFF（Backend for Frontend）的关键层：
-
-- 接收 Vercel AI SDK `useChat` POST 请求
-- 转发到 Python 后端 `/api/agent/chat`
-- 将 Python SSE 格式（`event: ui\ndata: {...}`）转换为 AI SDK v3 协议（`2:[...]` message_annotations）
-- 在服务端集成 Langfuse JS SDK，追踪前端请求
-
-**为什么需要这一层？** 直接在浏览器调用后端会暴露 API 密钥、有跨域限制，且无法做服务端 Langfuse 追踪。BFF 层解决了这三个问题，同时可在此做缓存、限流等横切关注点。
-
----
-
-## 核心设计决策
-
-### 1. 为什么用 LangGraph 而非直接调用 LLM？
-
-**问题**：企业退款流程不是单次对话，而是包含多步骤、条件分支、等待人工介入的**业务流程**。直接调用 LLM 无法在等待 Manager 审批时暂停——进程重启后状态丢失，也无法精确控制哪一步需要人工介入或回放历史执行轨迹。
-
-**解决方案**：LangGraph 的显式状态机图让每一步都明确、可审计。`interrupt_before=["human_review"]` 使图在高风险节点前自动序列化到 Redis/PostgreSQL，进程重启后 `graph.ainvoke(None, config)` 即可从断点续传。这在合规要求严格的企业场景下不可或缺。
-
----
-
-### 2. 为什么用 Generative UI（Server-Driven UI）？
-
-**问题**：退款流程的每一步呈现不同信息（订单详情 vs 风险评分 vs 审批面板），传统做法需要前端预先写死所有可能的 UI 状态，与业务逻辑高度耦合。
-
-**解决方案**：后端节点决定推送什么 UI 组件，前端动态实例化。这种**服务端驱动 UI** 模式解耦了业务逻辑和展示逻辑——增加新节点只需新增一个 React 组件，无需修改主界面代码。
-
-技术实现：Python SSE 推送 `{type: "OrderCard", props: {...}}`，Next.js Route Handler 转换为 AI SDK `message_annotations`，前端 `useChat` 消费并动态渲染。
-
----
-
-### 3. 为什么用 LLM + Regex 双重分类策略？
-
-**问题**：生产环境中 LLM API 会出现超时、限流、服务中断。退款分类是入口，如果这里失败整个流程都阻塞。
-
-**解决方案**：先用 Gemini 尝试结构化 JSON 提取，失败时切换到正则规则引擎（不依赖任何外部服务）。规则引擎覆盖最常见的退款场景（中英文关键词匹配），保证系统在 LLM 不可用时仍能运行，实现真正的高可用。
-
----
-
-### 4. 为什么选 NumPy TF-IDF 而非向量数据库做 RAG？
-
-**问题**：政策问答只有 10 条文档。引入 Pinecone/Weaviate 等向量数据库增加了运维复杂度、网络延迟和成本，但对这个数据规模没有性能收益。
-
-**解决方案**：在服务启动时用 NumPy 计算 TF-IDF 矩阵，查询时做余弦相似度排序。无外部依赖、零额外延迟、百分百可控。当文档超过数百条时，可平滑迁移到 pgvector（已在 PostgreSQL 中预装）。
-
----
-
-### 5. 为什么全面实现幂等性？
-
-**问题**：网络重试、用户刷新、进程重启都可能导致相同操作执行多次。退款重复执行会导致财务损失，邮件重复发送会骚扰收件人。
-
-**解决方案**：
-- `upsert_ticket(thread_id)` — 同一 thread 只创建一条工单
-- 退款以 `ticket_id` 为幂等键，防止双重退款
-- 邮件通知用 `(order_id, refund_id)` 哈希标记已发送集合，进程内去重
-
----
-
-### 6. 为什么用 Redis 做 LangGraph 检查点而非内存？
-
-**问题**：`MemorySaver` 检查点存在进程内存中，一旦服务重启或容器调度，所有等待人工审批的 Graph 状态全部丢失，Manager 批准时无法续传。
-
-**解决方案**：生产环境使用 `AsyncPostgresSaver`（PostgreSQL）或 Upstash Redis 存储检查点。状态序列化到外部存储后，任意进程实例都可以恢复任意 thread 的状态，实现真正的分布式有状态 Agent。
-
----
-
-## 业务流程
-
-### 低风险退款（全自动）
-
-```
-用户: "订单 789012 申请退款，商品破损"
-  ↓ classify_intent: intent=refund, order_id=789012, reason=damaged
-  ↓ lookup_order: 查到订单，金额 ¥320，状态已发货
-  ↓ UI: OrderCard 渲染订单卡片
-  ↓ check_risk: 风险分=15（低），自动审批通过
-  ↓ UI: RiskAlert 显示风险评估结果
-  ↓ execute_refund: 退款成功，单号 REFUND_ABC123
-  ↓ UI: RefundTimeline 展示四阶段进度
-  ↓ send_notification: 邮件已发送财务团队
-  ↓ UI: EmailPreview 展示邮件内容
-  ✅ 退款完成，预计 3 个工作日到账
-```
-
-### 高风险退款（需 Manager 审批）
-
-```
-用户: "订单 999999 申请退款"（金额 ¥600）
-  ↓ classify_intent + lookup_order（同上）
-  ↓ check_risk: 风险分=45（金额>¥500），需人工审核
-  ↓ UI: ApprovalPanel 渲染审批面板
-  ⏸ LangGraph INTERRUPT — 状态序列化到 Redis
-
-  [Manager 登录，切换角色为 MANAGER]
-  Manager 点击 "批准"
-  ↓ POST /api/agent/resume {action: "approve", reviewer_role: "MANAGER"}
-  ↓ 后端校验 MANAGER 权限，从 Redis 恢复 Graph 状态
-  ↓ human_review: 更新工单状态 APPROVED，记录 operator_id
-  ↓ execute_refund + send_notification（同低风险流程）
-  ✅ 退款完成
-```
-
-### 政策问答（RAG）
-
-```
-用户: "七天无理由退款怎么算？"
-  ↓ classify_intent: intent=query_policy
-  ↓ answer_policy_node: TF-IDF 检索，找到政策 P001、P003
-  ↓ Gemini: 基于政策原文生成回答，并返回 policy_citations
-  ✅ "根据政策 P001，消费者在收货后 7 个自然日内可申请无理由退款..."
-  ↳ References: P001 七天无理由退款, P003 发错商品退款
-```
-
----
-
-## 测试体系
-
-### 测试分层
-
-```
-tests/
-├── test_e2e_refund_flow.py      # 端到端集成测试（真实 LangGraph 图 + 真实 SQLite）
-├── test_sse_integration.py      # SSE 协议 + 路由集成测试
-├── test_api_routes.py           # FastAPI 路由 happy path
-├── test_answer_node.py          # answer_node ReAct 行为单元测试
-├── test_auth_and_ratelimit.py   # JWT 认证 + 限流中间件
-├── test_classifier.py           # 意图分类（LLM + 规则引擎）
-├── test_nodes.py                # 核心节点单元测试
-├── test_risk_scoring.py         # 风险评分计算
-└── test_edge_cases.py           # 边界情况与权限校验
-```
-
-### 端到端集成测试
-
-`test_e2e_refund_flow.py` 覆盖三条核心业务路径，使用**真实 LangGraph StateGraph + 真实 SQLite 数据库**，只 mock LLM 调用、邮件发送、Redis 连接：
-
-| 路径 | 测试内容 |
-|------|---------|
-| **Path A — 低风险自动退款** | SSE 序列完整（meta→ui→text→done）、meta 含 trace_id、无 interrupt 事件 |
-| **Path B — 高风险 → 批准** | interrupt 事件触发、`/resume approve` 流程完成、非 MANAGER 角色 403 |
-| **Path C — 高风险 → 拒绝** | 两步流程（提交+拒绝）均以 done 结束 |
-| **边界情况** | 订单不存在优雅降级、DB 宕机不暴露异常、query_order 意图路由正确 |
-
-运行测试：
+Backend:
 
 ```bash
 cd backend
-pytest tests/ -v --tb=short
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-# 仅跑端到端测试
-pytest tests/test_e2e_refund_flow.py -v
+alembic upgrade head
+python seed.py
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-# 运行 Evals（规则引擎，无需 API Key）
+Frontend:
+
+```bash
+cd frontend
+npm ci
+$env:BACKEND_URL="http://127.0.0.1:8000"
+npm run dev
+```
+
+## Demo Prompts
+
+```text
+订单号 123456 申请退款，商品破损
+订单号 789012 的最新状态是什么？
+我想申请 GitHub 管理员权限，用于生产发布
+我要报销 1200 元差旅费，有发票
+七天无理由退款怎么计算？什么情况下不能退？
+```
+
+## Environment Variables
+
+Backend:
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `REDIS_URL` | Recommended | Redis cache/checkpoint |
+| `GOOGLE_API_KEY` | Optional | Gemini for LLM classification/RAG answer |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Optional | Model Gateway failover providers |
+| `LLM_DEFAULT_PROVIDER` | Optional | Default provider, `gemini` / `openai` / `anthropic` |
+| `LLM_NODE_ROUTES_JSON` | Optional | Per-node ordered provider/model candidate chains |
+| `LLM_PRICE_CATALOG_JSON` | Optional | Estimated USD input/output price per 1M tokens |
+| `TOOL_CIRCUIT_FAILURE_THRESHOLD` / `TOOL_CIRCUIT_RESET_SECONDS` | Optional | Tool Gateway circuit breaker |
+| `APPROVAL_ESCALATION_WORKER_ENABLED` | Production | Scan overdue durable approval tasks |
+| `LANGFUSE_PUBLIC_KEY` | Optional | Langfuse public key |
+| `LANGFUSE_SECRET_KEY` | Optional | Langfuse secret key |
+| `LANGFUSE_HOST` | Optional | Default `https://cloud.langfuse.com` |
+| `FRONTEND_ORIGIN` | Production | CORS origin, e.g. Vercel domain |
+| `SCENARIO_CONFIG_DIR` | Production optional | Persistent scenario config directory |
+| `SECRET_KEY` | Production | JWT/app secret |
+| `ADMIN_API_KEY` | Production | 后端与 Vercel 服务端代理共享的管理接口密钥，禁止使用 `NEXT_PUBLIC_` 前缀 |
+| `AGENT_PUBLIC_URL` | Production | A2A Agent Card 中公布的后端地址 |
+| `SAP_CONNECTOR_MODE` | Optional | `mock` 或 `live`，默认 `mock` |
+| `SAP_BASE_URL` | Live SAP | SAP Sandbox/S/4HANA API 根地址 |
+| `SAP_AUTH_TYPE` | Live SAP | `api_key`、`oauth2_client_credentials`、`principal_propagation` 等 |
+| `SAP_API_KEY` | SAP Sandbox | SAP Business Accelerator Hub Sandbox API Key |
+| `SAP_CLIENT_ID` / `SAP_CLIENT_SECRET` / `SAP_TOKEN_URL` | SAP OAuth | OAuth2 Client Credentials，不写入数据库 |
+| `SAP_READ_ONLY` | Recommended | 默认 `true`，阻止远程写操作 |
+| `SAP_SHADOW_WRITES` | Recommended | 默认 `true`，只生成写入计划，不提交 SAP |
+| `SAP_OPERATION_PATHS_JSON` | Live SAP | 逻辑操作到租户 OData 路径的 JSON 映射 |
+
+Frontend:
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `BACKEND_URL` | Yes | Server-side route handlers proxy to backend |
+| `NEXT_PUBLIC_API_URL` | Optional | Browser-visible backend base if needed |
+| `ADMIN_API_KEY` | Admin console | 与 Render 后端一致，仅供 Next.js 服务端 Route Handler 使用 |
+
+## SAP Connector Modes
+
+| Mode | Remote read | Remote write | Use case |
+| --- | --- | --- | --- |
+| Mock | No | Deterministic local result | 本地开发、CI、面试演示 |
+| Live + Read Only | Yes | Blocked | SAP Sandbox 数据验证 |
+| Live + Shadow | Yes | Planned only | 上线前请求映射与权限验证 |
+| Live | Yes | Yes | 需要审批证据、变更单、幂等键和发布门禁全部通过 |
+
+关键接口：
+
+- `GET /api/erp/runtime/{connector_id}/health`：真实连接健康检查。
+- `PUT /api/erp/runtime/{connector_id}/config`：保存非敏感连接元数据。
+- `POST /api/erp/runtime/tools/execute`：通过 Tool Gateway 执行 ERP 工具。
+- `POST /api/erp/runtime/refunds/execute-finance-saga`：贷项凭证、清账和冲销补偿事务。
+- `POST /mcp`：MCP Streamable HTTP JSON-RPC。
+- `GET /.well-known/agent-card.json`、`POST /a2a`：A2A Agent 发现与任务委派。
+- `GET /api/admin/evals/enterprise-readiness`：持续发布门禁报告。
+- `GET /api/dashboard/erp-business-metrics`：成功率、P95、补偿率和业务结果。
+
+## Tests
+
+Core platform regression:
+
+```bash
+python -m pytest backend\tests\test_scenario_validation.py backend\tests\test_configurable_runtime.py backend\tests\test_supervisor_platform.py backend\tests\test_scenario_registry.py backend\tests\test_admin_config.py backend\tests\test_generic_approval.py backend\tests\test_policy_as_code.py backend\tests\test_tool_gateway.py backend\tests\test_enterprise_platform_governance.py -q
+```
+
+Frontend type check:
+
+```bash
+cd frontend
+npm run type-check
+```
+
+Rules-only eval:
+
+```bash
+cd backend
 python -m evals.run_evals
 ```
 
-### Evals 框架
+Recent verified result:
 
-`backend/evals/` 包含 20 个标注样本（`golden_dataset.json`），覆盖退款申请、工单查询、政策问答、订单号抽取与边界歧义场景。当前规则引擎模式（无需 API Key）评估结果：
+- SAP/ERP platform regression: `54 passed`
+- Frontend type check: passed
+- Rules-only eval dataset: `20/20` golden cases
 
-| 指标 | 当前结果 |
-|------|----------|
-| Overall Pass Rate | 100.0% (20/20) |
-| Intent Accuracy | 100.0% (20/20) |
-| Order-ID Accuracy | 100.0% (6/6) |
-| Reason Accuracy | 100.0% (20/20) |
+Note: full backend test collection requires `pytest-asyncio` from `backend/requirements-dev.txt`.
 
-报告产物示例见 `backend/evals/eval_report_sample.json`，真实运行会生成被 `.gitignore` 忽略的 `backend/evals/results_<run_id>.json`。报告包含：
+### Load profile
 
-| 字段 | 说明 |
-|------|------|
-| `metrics` | Overall / Intent / Order-ID / Reason Accuracy，以及平均延迟 |
-| `tag_stats` | 按 `refund`、`query_policy`、`explicit_order_id` 等标签拆分准确率 |
-| `cases` | 每条样本的输入、期望、预测、错误原因、延迟和分类方法 |
-| `quality_gates` | CI 阈值与通过状态，便于接入发布门禁 |
-
-CI 质量门阈值为 75% 意图准确率；同时支持 `--llm` 模式评估真实 LLM 分类效果。
-
----
-
-## 快速开始
-
-### 前置条件
-
-- Docker & Docker Compose
-- Google Gemini API Key（可选；无 Key 时会走规则/检索降级，部分 LLM 回答不可用）
-- Gmail App Password（可选，无则 mock 到控制台）
-- Langfuse 账号（可选，无则跳过追踪）
-
-### Docker 一键启动
+HTTP 压测使用 Locust（先启动并 seed 后端）：
 
 ```bash
-# 1. 克隆项目
-git clone <repo-url>
-cd enterprise-ticket-agent
-
-# 2. 配置环境变量
-cp .env.example .env
-# 如需真实 LLM 分类/RAG 回答，填写 GOOGLE_API_KEY；不填也可体验规则降级与主体流程
-
-# 3. 启动所有服务
-docker compose up --build
-
-# 4. 访问
-# 前端: http://localhost:3000
-# 后端 API: http://localhost:8000
-# API 文档: http://localhost:8000/docs
-```
-
-### 本地开发模式
-
-```bash
-# 后端
 cd backend
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-# 启动数据库（需要 Docker）
-docker compose up postgres redis -d
-
-# 运行数据库迁移
-alembic upgrade head
-
-# 启动后端
-# 注意：不要加 --reload，SSE 流在 Windows 上使用 --reload 时 TCP body 会丢失
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-
-# 前端（新终端）
-cd frontend
-npm install
-npm run dev                        # http://localhost:3000
+locust -f locustfile.py --host http://127.0.0.1:8000 --headless -u 20 -r 5 -t 2m
 ```
 
-### 快速测试场景
-
-在对话框中尝试以下输入：
-
-```
-# 低风险退款（自动处理，金额 < ¥500）
-订单 789012 申请退款，商品破损
-
-# 高风险退款（需切换角色为 MANAGER 后审批）
-订单 999999 申请退款
-
-# 订单查询
-我的订单 789012 处理到哪一步了？
-
-# 政策问答
-七天无理由退款怎么算？什么情况下不能退？
-```
-
-切换角色：点击界面右上角角色选择器，选择 **MANAGER** 后可在 ApprovalPanel 中点击批准/拒绝。
-
----
-
-## 环境变量配置
+零外部依赖的 runtime smoke benchmark：
 
 ```bash
-# ── 数据库 ──────────────────────────────────────
-POSTGRES_USER=ticketuser
-POSTGRES_PASSWORD=ticketpass
-DATABASE_URL=postgresql+asyncpg://ticketuser:ticketpass@postgres:5432/ticketdb
-
-# ── Redis ────────────────────────────────────────
-REDIS_URL=redis://redis:6379
-# Serverless 部署时使用（二选一）
-UPSTASH_REDIS_URL=rediss://xxx.upstash.io:6380
-UPSTASH_REDIS_TOKEN=your-token
-
-# ── LLM ─────────────────────────────────────────
-GOOGLE_API_KEY=<your-google-api-key>
-GEMINI_MODEL=gemini-2.0-flash      # 默认
-
-# ── 风险规则 ─────────────────────────────────────
-RISK_THRESHOLD_AMOUNT=500.0        # 超过此金额触发人工审核
-
-# ── 邮件通知 ─────────────────────────────────────
-GMAIL_USER=finance@yourcompany.com
-GMAIL_APP_PASSWORD=<your-gmail-app-password>   # Gmail 应用专用密码（非账号密码）
-
-# ── 可观测性 ─────────────────────────────────────
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=<your-langfuse-secret-key>
-LANGFUSE_HOST=https://cloud.langfuse.com  # 或自建实例
-
-# ── 前端 ─────────────────────────────────────────
-NEXT_PUBLIC_API_URL=http://localhost:8000  # 本地开发
-BACKEND_URL=http://backend:8000            # Docker 内网 DNS
-
-# ── 开发调试 ─────────────────────────────────────
-SIMULATE_DATABASE_DOWN=false   # true 时模拟 DB 宕机，测试降级路径
+cd backend
+python scripts/agent_runtime_benchmark.py --requests 200 --concurrency 20
 ```
 
----
+本机 Locust 实测：并发 `20`、`526/526` HTTP 请求成功、总吞吐 `27.50 req/s`；聚合 P50 `13 ms`、P95 `2100 ms`，其中 Agent SSE 请求 P50 `2100 ms`、P95 `2200 ms`。测试使用 SQLite 且关闭外部 LLM key，是可复现基线而非生产容量承诺。deterministic runtime dry-run 另测得并发 `20`、`200/200` 成功、P50 `0.134 ms`、P95 `0.147 ms`。完整报告见 `docs/reports/p1-load-smoke.json`。
 
-## 项目结构
+## Key Directories
 
-```
-enterprise-ticket-agent/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                    # FastAPI 入口，路由注册，CORS 配置
-│   │   ├── agent/
-│   │   │   ├── graph.py               # LangGraph 图编译，节点注册，条件路由
-│   │   │   ├── state.py               # AgentState TypedDict 定义
-│   │   │   ├── state_machine.py       # 业务状态机（9 状态，合法流转校验）
-│   │   │   ├── utils.py               # Graph 工具函数
-│   │   │   └── nodes/
-│   │   │       ├── classifier.py      # 意图分类（LLM + 正则降级）
-│   │   │       ├── order_lookup.py    # 订单查询节点
-│   │   │       ├── risk_check.py      # 风险评分节点
-│   │   │       ├── human_review.py    # 人工审批节点（Graph interrupt 续传）
-│   │   │       ├── refund.py          # 退款执行节点
-│   │   │       ├── notification.py    # 邮件通知节点（幂等）
-│   │   │       ├── answer.py          # 通用查询回答节点
-│   │   │       └── policy.py          # RAG 政策问答节点
-│   │   ├── tools/
-│   │   │   ├── order_tools.py         # get_order_detail Tool
-│   │   │   ├── refund_tools.py        # check_risk_level + execute_refund Tools
-│   │   │   ├── notification_tools.py  # send_notification Tool（SMTP + 幂等）
-│   │   │   ├── ticket_tools.py        # get_ticket_status Tool
-│   │   │   └── policy_tools.py        # search_policy_raw Tool（TF-IDF RAG）
-│   │   ├── api/
-│   │   │   └── routes/
-│   │   │       ├── chat.py            # /chat + /resume + /audit + /replay 端点
-│   │   │       └── dashboard.py       # 运营统计端点（stats / node-latency / failed-traces）
-│   │   ├── db/
-│   │   │   ├── models.py              # SQLAlchemy ORM（User/Order/Ticket/RefundLog/AuditLog）
-│   │   │   └── database.py            # 异步 DB 引擎 + Session 工厂
-│   │   └── core/
-│   │       ├── config.py              # Settings（从 .env 读取所有配置）
-│   │       ├── permissions.py         # RBAC 权限校验（USER/AGENT/MANAGER）
-│   │       ├── observability.py       # Langfuse Callback Handler
-│   │       └── logging.py             # structlog 配置
-│   ├── alembic/                       # 数据库迁移版本
-│   ├── tests/
-│   │   ├── test_e2e_refund_flow.py    # 端到端集成测试（真实图 + 真实 DB）（新增）
-│   │   ├── test_sse_integration.py    # SSE 协议集成测试
-│   │   ├── test_api_routes.py         # API 路由 happy path
-│   │   ├── test_answer_node.py        # ReAct 节点单元测试
-│   │   ├── test_auth_and_ratelimit.py # JWT + 限流
-│   │   ├── test_classifier.py         # 意图分类
-│   │   ├── test_nodes.py              # 核心节点
-│   │   ├── test_risk_scoring.py       # 风险评分
-│   │   └── test_edge_cases.py         # 边界情况
-│   ├── evals/                         # 意图分类 Evals（20 golden cases）
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/
-│   ├── app/
-│   │   ├── page.tsx                   # 主对话界面
-│   │   ├── dashboard/
-│   │   │   └── page.tsx               # 运营仪表盘 + ChainReplay
-│   │   └── api/
-│   │       ├── chat/route.ts          # SSE 协议适配器（Python → AI SDK）
-│   │       ├── dashboard/
-│   │       │   ├── stats/route.ts
-│   │       │   ├── failed-traces/route.ts
-│   │       │   └── node-latency/route.ts  # 节点耗时代理端点（新增）
-│   │       ├── agent/audit/[threadId]/route.ts
-│   │       └── agent/replay/[threadId]/route.ts
-│   ├── components/
-│   │   ├── generative/
-│   │   │   ├── AgentThinkingStream.tsx  # 节点执行进度流
-│   │   │   ├── OrderCard.tsx            # 订单详情卡
-│   │   │   ├── ApprovalPanel.tsx        # 审批面板（含仿真动画）
-│   │   │   ├── RiskAlert.tsx            # 风险评分展示
-│   │   │   ├── RefundTimeline.tsx       # 退款四阶段进度
-│   │   │   └── EmailPreview.tsx         # 邮件内容预览
-│   │   ├── AuditLogPanel.tsx            # 实时审计日志侧栏
-│   │   ├── ChainReplay.tsx              # 执行链可视化回放
-│   │   └── ErrorBoundary.tsx            # 组件错误隔离
-│   ├── store/
-│   │   └── authStore.ts               # Zustand 角色状态
-│   ├── lib/
-│   │   └── utils.ts                   # 格式化工具函数
-│   ├── package.json
-│   └── Dockerfile
-├── docker-compose.yml                 # 全栈编排（postgres/redis/backend/frontend）
-└── .env.example                       # 环境变量模板
+```text
+backend/app/agent/
+  graph.py                     LangGraph workflow
+  nodes/                       refund, permission, reimbursement, policy nodes
+  scenario_registry.py         supervisor scenario registry
+  generic_runtime.py           config-driven runtime
+  tool_gateway.py              permission/risk/idempotency/audit boundary
+  scenario_validation.py       config validator
+  scenario_versions.py         publish/version/rollback snapshots
+  saga.py                      compensation transaction primitives
+  enterprise_readiness.py      continuous enterprise release gates
+
+backend/app/llm/               provider routing, failover, token/cost ledger
+backend/app/services/          SSE, chat stream, cache, audit, approval services
+
+backend/app/scenarios/         scenario JSON configs
+backend/app/policies/          Policy-as-Code rules
+backend/app/erp/               SAP connector runtime, Mini ERP, refund finance Saga, business metrics
+backend/app/api/routes/        chat/admin/approval/dashboard APIs
+frontend/app/admin/            Scenario Studio, Simulation, Approval Center
+frontend/components/generative Generative UI cards and panels
+docs/                          architecture notes and implementation docs
 ```
 
----
+## Deployment
 
-## 可观测性与调试
+Backend uses Render:
 
-### Langfuse 追踪
+- `render.yaml` defines PostgreSQL, Redis, and Docker backend service.
+- Render backend root: `backend`
+- Health check path: `/health`
+- Required env vars: `DATABASE_URL`, `REDIS_URL`, `SECRET_KEY`, `FRONTEND_ORIGIN`
+- Optional env vars: `GOOGLE_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`
+- SAP Sandbox env vars: `SAP_CONNECTOR_MODE`, `SAP_BASE_URL`, `SAP_AUTH_TYPE`, `SAP_API_KEY`
+- 安全默认值：`SAP_READ_ONLY=true`、`SAP_SHADOW_WRITES=true`
 
-每次对话都会在 Langfuse 生成完整 trace，包含：
-- 每个 LangGraph 节点的输入/输出
-- Gemini Token 用量和费用
-- 节点执行延迟（可识别性能瓶颈）
-- 前端 HTTP 请求与后端节点的关联（通过 sessionId = thread_id）
+Frontend uses Vercel:
 
-访问 [cloud.langfuse.com](https://cloud.langfuse.com) 查看。
+- Project root: `frontend`
+- Build command: `npm run build`
+- Install command: `npm ci`
+- Required env var: `BACKEND_URL=https://enterprise-ticket-agent-backend.onrender.com`
+- Admin console env var: `ADMIN_API_KEY`，值必须与 Render 后端一致
 
-### 审计日志 API
+For persistent editable scenario configs in production, configure `SCENARIO_CONFIG_DIR` to a mounted persistent path. If not set, the app uses bundled scenarios from `backend/app/scenarios`.
+
+## Interview Talking Points
+
+可以把项目介绍为：
+
+> 我做的是一个可配置的企业级 Agent 工作流平台。它不是简单 ReAct Agent，而是 Supervisor 先做场景路由，命中场景后由配置化 runtime 执行 slot extraction、Tool Gateway、Policy-as-Code 和 UI template。高风险动作进入多级 HITL 审批，所有工具调用都有权限、幂等、审计和 replay。为了降低上线风险，我做了 Simulation Lab、场景级 eval、版本快照和 rollback。
+
+重点可展开：
+
+- 为什么不用纯 ReAct：企业流程需要确定性、可审计、可恢复。
+- 为什么用 LangGraph：显式状态机、可中断、可 checkpoint、适合 HITL。
+- 为什么抽象 Tool Gateway：隔离 LLM 与副作用系统，统一权限和审计。
+- 为什么做 Policy-as-Code：把高风险判断从 prompt 中移出来，提升确定性。
+- 为什么做 Simulation/Eval：配置变更需要发布前验证。
+
+## Data Platform Operations
+
+### Canonical data and financial invariants
+
+- 工作流内部统一使用 `ERP-ORD-*` Canonical ID；`123456`、`789012` 等旧编号通过 `erp_business_object_aliases` 解析。
+- 订单、退款和总账包含统一 `currency` 字段；金额使用 `Numeric(18,2) + Decimal`。
+- 过账前校验金额非负、借贷平衡，以及订单、支付、发票、退款、贷项凭证和清账的币种一致性。
+- 新迁移会自动回填旧订单的 `source_system`、`external_order_id`、`currency` 和 Alias。
 
 ```bash
-# 查询某次对话的完整执行链
-curl http://localhost:8000/api/agent/audit/{thread_id}
-
-# 获取可视化回放数据（节点耗时、状态快照）
-curl http://localhost:8000/api/agent/replay/{thread_id}
-
-# 查看当前 Agent 状态（开发环境）
-curl http://localhost:8000/api/agent/debug/{thread_id}
+cd backend
+python scripts/migrate.py status
+python scripts/migrate.py baseline          # dry-run legacy schema detection
+python scripts/migrate.py baseline --apply  # stamp only after review
+python scripts/migrate.py upgrade
+python scripts/migrate.py rollback --target a902ebde4f49
 ```
 
-### Dashboard 节点耗时图表
+CI 的 `PostgreSQL Migration & RLS` job 会执行 fresh upgrade、schema drift、rollback/re-upgrade，并使用非超级用户验证跨租户读写隔离。
 
-访问 `http://localhost:3000/dashboard`，「节点耗时」图表展示各 Agent 节点的 avg / P95 耗时：
-- 颜色编码：P95 > 3000ms 标红（严重瓶颈）、> 1000ms 标橙（需关注）、其余蓝色正常
-- 数据来源：`/api/dashboard/node-latency`，实时从 AuditLog 聚合近 7 天成功执行记录
+### Security and worker configuration
 
-### Dashboard 执行链回放
+| Variable | Purpose |
+| --- | --- |
+| `DEFAULT_TENANT_ID` | 默认租户；JWT 中的 `tenant_id` 会覆盖该值并进入 PostgreSQL RLS 上下文 |
+| `FIELD_ENCRYPTION_KEY` | 本地 KMS 主密钥，仅用于包裹每条 PII 的随机 data key |
+| `KMS_PROVIDER` | `local` 或 `http`；生产可连接 HTTPS Vault/KMS Gateway |
+| `KMS_ENDPOINT` / `KMS_BEARER_TOKEN` | HTTP KMS Gateway 地址和服务凭据 |
+| `PII_DEFAULT_RETENTION_DAYS` | PII 默认保留期限 |
+| `OUTBOX_WORKER_ENABLED` | Web 内嵌 Worker；使用独立 Worker 时保持 `false` |
+| `RECONCILIATION_WORKER_ENABLED` | Web 内嵌 CDC 对账 Worker 开关 |
 
-访问 `http://localhost:3000/dashboard`，在 ChainReplay 组件中输入任意 thread_id，可视化查看整条执行链：每个节点的执行时间、成功/失败状态、退款状态机快照。
-
-### 模拟 DB 宕机
+Docker Compose 默认启动独立 `worker` 服务，也可以直接运行：
 
 ```bash
-SIMULATE_DATABASE_DOWN=true uvicorn app.main:app --port 8000
-# 发送退款请求，验证降级路径是否返回友好错误信息
+cd backend
+python -m app.erp.worker_main
 ```
 
----
+该进程执行 Outbox 投递、指数退避、DLQ 和 CDC 自动对账；PostgreSQL 多实例使用 `FOR UPDATE SKIP LOCKED` 抢占任务。
 
-## 安全与权限
+### Governance APIs
 
-### Agent Safety Regression Tests
+所有接口要求 JWT，租户来自 JWT `tenant_id`；生产环境拒绝不匹配的 `X-Tenant-ID`。
 
-`backend/tests/` 覆盖三类面试中常被追问的 Agent 安全场景：
+| API | Purpose |
+| --- | --- |
+| `POST /api/erp/governance/pii` | Envelope encryption 写入 PII |
+| `GET/DELETE /api/erp/governance/pii/...` | 按用途读取或执行加密删除 |
+| `POST /api/erp/governance/pii/purge-expired` | 按租户清理到期 PII |
+| `GET /api/erp/governance/outbox` | 查看当前租户 Outbox/DLQ |
+| `POST /api/erp/governance/outbox/dispatch` | 派发当前租户事件 |
+| `POST /api/erp/governance/outbox/{id}/replay` | 重放 Dead Letter |
+| `POST /api/erp/governance/cdc` | 写入幂等 CDC 事件和 checkpoint |
+| `POST /api/erp/governance/reconciliation` | 创建或关闭跨系统差异 |
+| `POST /api/erp/governance/contracts` | 注册带兼容性检查的数据契约版本 |
+| `POST /api/erp/governance/lineage` | 登记表级或字段级血缘 |
 
-| 风险 | 覆盖方式 |
-|------|----------|
-| Prompt injection | 政策问答遇到“忽略规则/泄露 Key/直接批准”等注入文本时，仍只返回检索到的政策引用 |
-| 越权审批 | `USER` / `AGENT` 即使构造 `approve` 决策，也会被 `human_review_node` 的 RBAC 拦截 |
-| 敏感信息泄露 | 审计日志/SSE 输出前通过 `mask_dict()` 脱敏邮箱、手机号、API Key、Token 等模式 |
+### SAP Sandbox verification
 
-### RBAC 角色权限
-
-| 角色 | 可执行操作 |
-|------|-----------|
-| **USER** | 发起退款申请、查询政策、查看自己的工单 |
-| **AGENT** | 查看订单详情、查看统计数据 |
-| **MANAGER** | 审批/拒绝高风险退款（金额 > ¥500） |
-
-- `/api/agent/resume` 服务端强校验 `reviewer_role == "MANAGER"`，非 Manager 返回 HTTP 403
-- 前端 ApprovalPanel 中，非 Manager 角色按钮不可点击（UI 层保护）
-
-### 数据脱敏
-
-AuditLog 写入前通过 `mask_dict()` 移除 PII：
-- 电子邮件地址、手机号等敏感字段自动过滤
-
-### 生产部署安全
-
-- Docker 容器以非 root 用户（`appuser`）运行
-- 所有密钥通过环境变量注入，不硬编码
-- Gmail 使用应用专用密码（App Password），非账号密码
-
----
-
-## 数据库迁移
+连接器支持 OData v2/v4 映射、SAP 错误结构、CSRF、ETag、JSON/Multipart Batch、Credit Memo Request、OAuth 和 Principal Propagation。配置真实 Sandbox 后运行：
 
 ```bash
-# 生成新迁移
-alembic revision --autogenerate -m "add new field"
+cd backend
+python scripts/sap_sandbox_smoke.py --order-id <sandbox-order-id>
 
-# 应用迁移
-alembic upgrade head
-
-# 回滚一步
-alembic downgrade -1
-
-# 查看迁移历史
-alembic history
+# 仅在隔离 Sandbox 且明确允许写入时执行
+python scripts/sap_sandbox_smoke.py --order-id <id> --write-credit-memo
 ```
 
----
+默认保持 `SAP_READ_ONLY=true` 和 `SAP_SHADOW_WRITES=true`。
+
+### Performance, backup and DR
+
+```bash
+# PostgreSQL 月分区
+python backend/scripts/manage_partitions.py --year 2026 --month 7
+
+# 百万行数据与索引基准
+python backend/scripts/performance_benchmark.py --rows 1000000 --confirm-write
+python backend/scripts/performance_benchmark.py --cleanup --confirm-write
+
+# 备份、校验、恢复和隔离 DR 演练
+python backend/scripts/backup_restore.py backup --output-dir ./backups
+python backend/scripts/backup_restore.py verify --backup ./backups/<backup-file>
+python backend/scripts/backup_restore.py restore --backup <file> --target-url <url> --confirm-target <database-name>
+python backend/scripts/backup_restore.py drill --target-url <isolated-dr-url> --confirm-target <database-name> --output-dir ./dr --rto-seconds 900
+```
+
+手动 GitHub Actions 工作流 `Data Platform Performance & DR Drill` 默认执行 100 万行基准、分区创建、备份、隔离恢复、表计数校验和 RTO 判定。
+
+## SAP 商用 Agent 演进能力
+
+本项目现在支持以 LangGraph Code-Based Agent 的方式接入 SAP Joule Studio BYOA，而不是重新实现 SAP：
+
+- `GET /.well-known/agent-card.json`：A2A 0.3 Agent Card。
+- `POST /a2a`：支持 `message/send`、`tasks/get`、`tasks/cancel`、Push Config set/get。
+- A2A Task 与状态事件持久化；独立 Worker 可在 Web 服务重启后继续处理。
+- 异步任务支持 Push Notification、失败退避和重新投递。
+- JWT 中的 `tenant_id` 与用户角色会传播到场景运行时，不会在 Worker 中提升权限。
+
+退款财务执行已升级为持久化 Saga：
+
+```text
+Sales Order -> Delivery -> Billing -> Open Item
+            -> 金额/币种/清账状态校验
+            -> Credit Memo -> Clearing
+            -> 失败时 Reversal / Manual Review
+            -> Transactional Outbox + Usage Event
+```
+
+每个读取、Policy 决策和写操作都会生成 hash-chained Evidence。管理员可调用：
+
+```text
+GET /api/erp/governance/evidence/{saga_id}
+```
+
+返回可校验的证据链、步骤、审批 ID、来源系统、SAP Request ID 和 Bundle Hash。
+
+### 商业运营后台
+
+页面：`/admin/operations`
+
+| API | 作用 |
+| --- | --- |
+| `POST /api/commercial/onboarding/provision` | 初始化当前租户、试用套餐与默认 SLO |
+| `PATCH /api/commercial/onboarding` | 更新身份、Connector、Policy、Eval、Shadow Write 等开通门禁 |
+| `PUT /api/commercial/subscription` | 修改套餐和月度 Action 配额 |
+| `GET /api/commercial/operations/snapshot` | 查看 Usage、Saga、A2A、Outbox、SLA 和业务 KPI |
+
+Usage Event 使用 `(tenant, metric, source_type, source_id)` 幂等约束，Saga/A2A 重放不会重复计费。
+
+### 尚需外部环境验收
+
+代码已具备 SAP OData、CSRF、ETag、Batch、Principal Propagation、A2A 和 Push Notification 能力，但以下结果不能在无账号环境中宣称完成：
+
+- 真实 SAP S/4HANA Sandbox 的 Sales Order、Delivery、Billing、Open Item 字段映射。
+- 真实 Credit Memo Request、Clearing、Reversal 写入。
+- SAP BTP Destination、Cloud Connector 与 IAS App2App Trust。
+- Joule Studio 对远程 A2A Agent 的同步和异步端到端调用。
+
+生产接入前保持 `SAP_READ_ONLY=true` 与 `SAP_SHADOW_WRITES=true`，先保存 Sandbox Smoke Report，再通过变更审批开放写入。
+
+## Agent 与企业数据统一运行时
+
+当前主链路不再把 Agent 与 ERP 能力分成两套演示：
+
+```text
+Web / A2A
+  -> Supervisor Root Graph
+     -> refund subgraph
+        -> canonical order context
+        -> risk + user history fan-out/fan-in
+        -> dynamic HITL interrupt
+        -> durable Refund Finance Saga
+        -> credit memo + clearing + compensation + outbox + evidence
+     -> configured scenario subgraph
+        -> slot extraction
+        -> one or more policy bindings
+        -> one or more Tool Gateway calls
+        -> multi-stage dynamic HITL
+        -> canonical business table persistence
+```
+
+- 每个启用场景都会成为独立 LangGraph Subgraph；Supervisor 根图只负责场景选择。
+- 非退款场景使用 Config Runtime，支持 `tools[]`、`policies[]`、多级审批和统一 UI 模板。
+- 权限申请最终写入 `erp_access_requests`，报销最终写入 `erp_reimbursement_claims`。
+- 退款 Agent 最终调用持久化 Finance Saga，不再调用仅返回成功结果的模拟退款函数。
+- 风控与用户历史查询真实并行执行，在 `risk_decision` 节点 fan-in 后做确定性路由。
+- HITL 使用动态 `interrupt()` / `Command(resume=...)`；审批恢复后继续原 Subgraph。
+- 生产环境使用 PostgreSQL Checkpointer；Redis/Valkey 仅承担缓存、限流和幂等辅助，不作为生产 Graph 状态的唯一来源。
+- 开发环境允许 MemorySaver；生产数据库或 Checkpointer 初始化失败时服务直接启动失败，避免静默丢失审批状态。
+
+相关实现：
+
+```text
+backend/app/agent/graph.py
+backend/app/agent/nodes/generic_approval.py
+backend/app/agent/nodes/refund.py
+backend/app/erp/refund_saga.py
+backend/tests/test_agent_data_unification.py
+```
+
+## 三步新增企业场景
+
+权限申请和报销共用同一个 Config Runtime 与通用 HITL Subgraph。新增场景不修改
+`graph.py`，只增加业务适配器、策略绑定和一份声明式配置。下面是新增“采购审批”
+时的最小结构 diff：
+
+```diff
+# 1. 注册 Tool Gateway 适配器（真实实现可调用 ERP Connector）
++ TOOL_HANDLERS["create_purchase_request"] = create_purchase_request
++ TOOL_SPECS["create_purchase_request"] = ToolSpec(...)
+
+# 2. 注册确定性策略函数
++ POLICY_HANDLERS["purchase_review"] = evaluate_purchase_review_policy
+
+# 3. 新增 backend/app/scenarios/purchase_request.json
++ {
++   "id": "purchase_request",
++   "workflow": "configured_workflow",
++   "intents": ["purchase_request"],
++   "keywords": ["采购申请", "purchase request"],
++   "tools": ["create_purchase_request"],
++   "policies": ["purchase_review"],
++   "runtime": {
++     "schema_version": "2",
++     "slot_extraction": {"fields": {}},
++     "tool": {"name": "create_purchase_request", "args": {}},
++     "policy": {"name": "purchase_review", "args": {}},
++     "reply_template": "采购申请 {request.requestId} 已创建",
++     "ui": {"business_request_card": {}}
++   }
++ }
+```
+
+启动或重新加载 Registry 后，Supervisor 会自动发现配置，并为它创建相同的通用
+Subgraph：`slot extraction -> policy -> Tool Gateway -> dynamic HITL -> finalize`。
+验收测试位于 `backend/tests/test_configurable_runtime.py` 和
+`backend/evals/trajectory_dataset.json`。
+
+## 生产级 Policy RAG
+
+- 60 条企业政策语料按段落切分为稳定 `document_id / paragraph_id`。
+- PostgreSQL 使用 pgvector 768 维向量和 HNSW cosine 索引；Gemini embedding 负责建库和查询。
+- Top-K 候选支持词法重排，向量库或模型不可用时自动降级到字符 bigram TF-IDF。
+- 每次回答返回文档、段落、来源和检索方式，前端通过 PolicyCards 展示证据。
+- `POST /api/admin/knowledge/policies/reindex` 执行增量或强制重建索引。
+- `/admin/evals` 展示轨迹、RAG Recall@4、引用忠实度、24 条安全红队和 Answer Judge 门禁。
+
+CI 同时运行旧分类器集和 P0 release gates；确定性 Judge 不调用外部模型，设置
+`EVAL_LLM_JUDGE=1` 后可启用 Gemini LLM-as-Judge。
+
+完整交付证据见 `docs/reports/P0_COMPLETION_REPORT.md`。
+
+## P2 Agent 差异化能力
+
+P2 已把热点概念接入现有治理运行时，而不是另建一套旁路 Demo：
+
+```text
+Supervisor Root Graph
+  -> Risk Specialist Subgraph (risk + long-term history fan-out/fan-in)
+  -> Policy QA Specialist Subgraph (permission-aware RAG + citation)
+  -> deterministic Policy-as-Code
+  -> Tool Gateway / MCP
+  -> HITL / durable Agent Job / checkpoint resume
+```
+
+- **MCP Server**：`POST /mcp` 实现 Streamable HTTP JSON-RPC，支持
+  `initialize`、`tools/list`、`tools/call` 与会话协商。MCP 只暴露 Tool Gateway
+  中可执行的 ERP 工具，写操作仍受 RBAC、Policy、审批、幂等和审计约束。
+- **受控多 Agent**：政策问答与风控是窄职责 LangGraph Subgraph；Supervisor
+  负责路由，高风险业务仍由确定性工作流和 HITL 决策，不允许子 Agent 绕过执行边界。
+- **Prompt / Policy 灰度**：按 `sha256(node:routing_key) % 100` 做稳定分桶。
+  Prompt 版本、变体、模板哈希和 Policy 版本进入节点 AuditLog；LLMUsage 额外记录
+  token、成本、延迟与版本维度，Dashboard 可按 Prompt 版本聚合。
+- **跨会话长期记忆**：仅持久化显式偏好与高价值纠纷/风险事实，支持租户隔离、
+  过期时间和更新；风控 Specialist 会把历史争议纳入评分，不保存原始整段聊天。
+- **持久化 Agent Job**：`POST /api/agent/jobs` 创建任务，`GET` 查询，
+  `POST /{job_id}/cancel` 取消。队列支持 Idempotency-Key、失败退避、陈旧锁回收、
+  PostgreSQL `FOR UPDATE SKIP LOCKED` 和多 Worker 并发消费；等待审批的任务保留为
+  `waiting_approval`，由 LangGraph checkpoint 从原位置继续。
+
+关键配置：
+
+```text
+PROMPT_VERSIONS_JSON
+PROMPT_ROLLOUTS_JSON
+POLICY_CANARY_JSON
+POLICY_CANARY_PERCENT
+LONG_TERM_MEMORY_RETENTION_DAYS
+AGENT_JOB_WORKER_ENABLED
+AGENT_JOB_WORKER_ID
+```
+
+Prompt 管理接口为 `GET /api/admin/prompts` 与
+`POST /api/admin/prompts/preview`，生产环境要求 `X-Admin-API-Key`。
+完整交付证据见 `docs/reports/P2_COMPLETION_REPORT.md`。
 
 ## License
 

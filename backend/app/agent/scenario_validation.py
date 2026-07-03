@@ -15,7 +15,7 @@ from app.core.policy import load_policy
 
 KNOWN_ROLES = {"USER", "AGENT", "MANAGER", "SECURITY", "FINANCE"}
 SUPPORTED_SLOT_EXTRACTORS = {"keyword_map", "keyword_enum", "amount", "message_excerpt"}
-CONFIG_DRIVEN_ENTRYPOINTS = {"permission_request", "reimbursement"}
+CONFIG_DRIVEN_ENTRYPOINTS = {"permission_request", "reimbursement", "configured_runtime"}
 TEMPLATE_REFERENCE_RE = re.compile(r"\{([A-Za-z0-9_.]+)\}")
 
 
@@ -80,13 +80,8 @@ def summarize_validation(reports: Iterable[ScenarioValidationReport]) -> dict[st
 
 
 def _validate_scenario_shell(config: ScenarioConfig, issues: list[ScenarioValidationIssue]) -> None:
-    if config.workflow not in WORKFLOW_ENTRYPOINTS:
-        _error(
-            issues,
-            "workflow.unknown",
-            "workflow",
-            f"Workflow '{config.workflow}' is not registered in WORKFLOW_ENTRYPOINTS.",
-        )
+    if not config.workflow.strip():
+        _error(issues, "workflow.missing", "workflow", "Workflow identifier is required.")
 
     if config.status not in {"active", "draft", "paused"}:
         _error(issues, "status.invalid", "status", f"Unsupported scenario status '{config.status}'.")
@@ -172,7 +167,7 @@ def _validate_runtime(config: ScenarioConfig, issues: list[ScenarioValidationIss
     entrypoint = WORKFLOW_ENTRYPOINTS.get(config.workflow)
 
     if not runtime:
-        if entrypoint in CONFIG_DRIVEN_ENTRYPOINTS:
+        if config.id != "refund" or entrypoint in CONFIG_DRIVEN_ENTRYPOINTS:
             _error(
                 issues,
                 "runtime.required",
@@ -259,34 +254,48 @@ def _validate_runtime_tool(
     slot_fields: set[str],
     issues: list[ScenarioValidationIssue],
 ) -> None:
-    tool = runtime.get("tool")
-    if not isinstance(tool, Mapping):
+    raw_tools = runtime.get("tools") or [runtime.get("tool")]
+    tools = [tool for tool in raw_tools if isinstance(tool, Mapping)]
+    if not tools:
         _error(issues, "runtime.tool.missing", "runtime.tool", "runtime.tool must be configured.")
         return
 
+    for index, tool in enumerate(tools):
+        path = "runtime.tool" if len(tools) == 1 else f"runtime.tools[{index}]"
+        _validate_runtime_tool_binding(config, tool, path, slot_fields, issues)
+
+
+def _validate_runtime_tool_binding(
+    config: ScenarioConfig,
+    tool: Mapping[str, Any],
+    path: str,
+    slot_fields: set[str],
+    issues: list[ScenarioValidationIssue],
+) -> None:
+
     tool_name = str(tool.get("name") or "")
     if not tool_name:
-        _error(issues, "runtime.tool.name_missing", "runtime.tool.name", "runtime.tool.name is required.")
+        _error(issues, "runtime.tool.name_missing", f"{path}.name", "runtime tool name is required.")
     elif tool_name not in list_runtime_tool_names():
         _error(
             issues,
             "runtime.tool.unknown",
-            "runtime.tool.name",
+            f"{path}.name",
             f"Runtime tool '{tool_name}' has no generic runtime handler.",
         )
     elif tool_name not in config.tools:
         _error(
             issues,
             "runtime.tool.not_declared",
-            "runtime.tool.name",
+            f"{path}.name",
             f"Runtime tool '{tool_name}' must also be declared in scenario.tools.",
         )
 
     args = tool.get("args")
     if not isinstance(args, Mapping) or not args:
-        _error(issues, "runtime.tool.args_missing", "runtime.tool.args", "runtime.tool.args must map tool arguments.")
+        _error(issues, "runtime.tool.args_missing", f"{path}.args", "runtime tool args must be mapped.")
     else:
-        _validate_references(args, "runtime.tool.args", slot_fields, {"slots", "context", "scenario", "input"}, issues)
+        _validate_references(args, f"{path}.args", slot_fields, {"slots", "context", "scenario", "input", "tool_results"}, issues)
 
 
 def _validate_runtime_policy(
@@ -295,34 +304,48 @@ def _validate_runtime_policy(
     slot_fields: set[str],
     issues: list[ScenarioValidationIssue],
 ) -> None:
-    policy = runtime.get("policy")
-    if not isinstance(policy, Mapping):
+    raw_policies = runtime.get("policies") or [runtime.get("policy")]
+    policies = [policy for policy in raw_policies if isinstance(policy, Mapping)]
+    if not policies:
         _error(issues, "runtime.policy.missing", "runtime.policy", "runtime.policy must be configured.")
         return
 
+    for index, policy in enumerate(policies):
+        path = "runtime.policy" if len(policies) == 1 else f"runtime.policies[{index}]"
+        _validate_runtime_policy_binding(config, policy, path, slot_fields, issues)
+
+
+def _validate_runtime_policy_binding(
+    config: ScenarioConfig,
+    policy: Mapping[str, Any],
+    path: str,
+    slot_fields: set[str],
+    issues: list[ScenarioValidationIssue],
+) -> None:
+
     policy_name = str(policy.get("name") or "")
     if not policy_name:
-        _error(issues, "runtime.policy.name_missing", "runtime.policy.name", "runtime.policy.name is required.")
+        _error(issues, "runtime.policy.name_missing", f"{path}.name", "runtime policy name is required.")
     elif policy_name not in list_runtime_policy_names():
         _error(
             issues,
             "runtime.policy.unknown",
-            "runtime.policy.name",
+            f"{path}.name",
             f"Runtime policy '{policy_name}' has no generic runtime evaluator.",
         )
     elif policy_name not in config.policies:
         _error(
             issues,
             "runtime.policy.not_declared",
-            "runtime.policy.name",
+            f"{path}.name",
             f"Runtime policy '{policy_name}' must also be declared in scenario.policies.",
         )
 
     args = policy.get("args")
     if not isinstance(args, Mapping) or not args:
-        _error(issues, "runtime.policy.args_missing", "runtime.policy.args", "runtime.policy.args must map evaluator arguments.")
+        _error(issues, "runtime.policy.args_missing", f"{path}.args", "runtime policy args must be mapped.")
     else:
-        _validate_references(args, "runtime.policy.args", slot_fields, {"slots", "context", "scenario", "input"}, issues)
+        _validate_references(args, f"{path}.args", slot_fields, {"slots", "context", "scenario", "input"}, issues)
 
 
 def _validate_runtime_response(

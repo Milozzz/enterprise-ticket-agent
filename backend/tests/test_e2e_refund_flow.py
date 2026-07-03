@@ -117,7 +117,7 @@ def _make_order_tool_mock(order_id: str, amount: float) -> MagicMock:
 # ── Fixture：共享 ASGI client + 真实 DB ──────────────────────────────────────
 
 @pytest_asyncio.fixture(scope="module")
-async def client_and_db():
+async def client_and_db(tmp_path_factory):
     """
     创建内存 SQLite + 测试用 ASGI client。
     预置 User 和 Order 行，避免 lookup_order_node 查不到数据。
@@ -132,7 +132,8 @@ async def client_and_db():
     import app.agent.nodes.human_review as human_review_node
     import app.db.ticket_repository as ticket_repository
 
-    engine = create_async_engine("sqlite+aiosqlite:///./test_e2e.db")
+    db_path = tmp_path_factory.mktemp("refund-e2e") / "test_e2e.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     Session = async_sessionmaker(engine, expire_on_commit=False)
     chat_route.AsyncSessionLocal = Session
     risk_check_node.AsyncSessionLocal = Session
@@ -167,12 +168,27 @@ async def client_and_db():
             ))
         await sess.commit()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://test",
-        timeout=30.0,
-    ) as c:
-        yield c, Session
+    async def fake_finance_saga(command, *, context):
+        del context
+        return {
+            "success": True,
+            "saga_id": f"SAGA-{command.refund_request_id}",
+            "status": "COMPLETED",
+            "credit_memo_id": f"CM-{command.refund_request_id}",
+            "clearing_document_id": f"CLR-{command.refund_request_id}",
+            "steps": [],
+        }
+
+    with patch(
+        "app.agent.nodes.refund.execute_refund_finance_saga",
+        new=AsyncMock(side_effect=fake_finance_saga),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            timeout=30.0,
+        ) as c:
+            yield c, Session
 
     await engine.dispose()
 

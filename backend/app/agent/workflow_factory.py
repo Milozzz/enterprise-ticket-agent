@@ -9,6 +9,7 @@ WORKFLOW_ENTRYPOINTS: dict[str, str] = {
     "refund_workflow": "classify_intent",
     "permission_request_workflow": "permission_request",
     "reimbursement_workflow": "reimbursement",
+    "configured_workflow": "configured_runtime",
 }
 
 
@@ -18,7 +19,7 @@ def resolve_workflow_name(scenario_id: str) -> str:
 
 def resolve_workflow_entry(scenario_id: str) -> str:
     workflow = resolve_workflow_name(scenario_id)
-    return WORKFLOW_ENTRYPOINTS.get(workflow, WORKFLOW_ENTRYPOINTS["refund_workflow"])
+    return WORKFLOW_ENTRYPOINTS.get(workflow, "configured_runtime")
 
 
 def route_to_workflow_entry(state: dict) -> str:

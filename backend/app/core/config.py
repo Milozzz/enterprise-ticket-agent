@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     # App
     environment: str = "development"
     secret_key: str = "change-me-in-production"
+    admin_api_key: str = ""
     frontend_origin: str = ""
     # JWT
     jwt_algorithm: str = "HS256"
@@ -66,6 +67,25 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./ticket.db"
+    default_tenant_id: str = "TENANT-DEMO-COMMERCE"
+    field_encryption_key: str = ""
+    field_encryption_key_id: str = "local-dev-v1"
+    kms_provider: str = "local"  # local | http
+    kms_endpoint: str = ""
+    kms_bearer_token: str = ""
+    pii_default_retention_days: int = 365
+    outbox_worker_enabled: bool = False
+    outbox_worker_poll_seconds: float = 1.0
+    outbox_worker_id: str = "web-embedded-worker"
+    reconciliation_worker_enabled: bool = False
+    reconciliation_worker_poll_seconds: float = 5.0
+    a2a_worker_enabled: bool = False
+    a2a_worker_poll_seconds: float = 1.0
+    a2a_worker_id: str = "web-a2a-worker"
+    a2a_worker_tenants: str = ""
+    a2a_allowed_callback_hosts: str = ""
+    a2a_default_callback_url: str = ""
+    a2a_callback_bearer_token: str = ""
     # Set this to a mounted persistent directory in production. When empty, the
     # platform uses the bundled repo scenarios.
     scenario_config_dir: str = ""
@@ -85,12 +105,45 @@ class Settings(BaseSettings):
     # LLM（仅使用 Google Gemini，免费额度充足）
     google_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-3-5-haiku-latest"
     model_temperature: float = 0.0             # Agent 决策时用确定性更强的低温度
+    llm_default_provider: str = "gemini"
+    # Optional JSON map: {"classify_intent": [{"provider":"gemini","model":"..."}]}
+    llm_node_routes_json: str = ""
+    # Prices are configurable estimates in USD per one million tokens.
+    llm_price_catalog_json: str = ""
+    # Prompt versions and stable/canary rollout rules, JSON encoded.
+    prompt_versions_json: str = ""
+    prompt_rollouts_json: str = ""
+    policy_canary_json: str = ""
+    policy_canary_percent: int = 0
+
+    # RAG: PostgreSQL + pgvector is the primary path; TF-IDF remains the
+    # fail-open read-only fallback when the embedding provider is unavailable.
+    rag_embedding_model: str = "models/text-embedding-004"
+    rag_embedding_dimensions: int = 768
+    rag_top_k: int = 4
+    rag_candidate_multiplier: int = 4
+    rag_chunk_size: int = 420
+    rag_chunk_overlap: int = 60
+    rag_rerank_enabled: bool = True
 
     # Business Rules
     risk_threshold_amount: float = 500.0        # 超过此金额触发人工审批
     max_agent_iterations: int = 15              # 防止 Agent 死循环
     agent_timeout_seconds: int = 60            # Agent 执行超时，触发降级
+    tool_circuit_failure_threshold: int = 3
+    tool_circuit_reset_seconds: int = 30
+    approval_escalation_poll_seconds: float = 30.0
+    approval_escalation_worker_enabled: bool = False
+    long_term_memory_retention_days: int = 730
+    agent_job_worker_enabled: bool = False
+    agent_job_poll_seconds: float = 1.0
+    agent_job_max_attempts: int = 3
+    agent_job_worker_id: str = "agent-job-worker"
 
     # Observability - Langfuse
     langfuse_public_key: str = ""
@@ -100,6 +153,38 @@ class Settings(BaseSettings):
     # Email (Gmail)
     gmail_user: str = ""
     gmail_app_password: str = ""
+
+    # SAP / ERP Connector runtime. Secrets stay in environment variables and
+    # are never persisted in connector records or audit payloads.
+    sap_connector_mode: str = "mock"  # mock | live
+    sap_base_url: str = ""
+    sap_auth_type: str = "oauth2_client_credentials"
+    sap_api_key: str = ""
+    sap_username: str = ""
+    sap_password: str = ""
+    sap_bearer_token: str = ""
+    sap_client_id: str = ""
+    sap_client_secret: str = ""
+    sap_token_url: str = ""
+    sap_scope: str = ""
+    sap_verify_tls: bool = True
+    sap_read_only: bool = True
+    sap_shadow_writes: bool = True
+    sap_timeout_seconds: float = 15.0
+    sap_max_retries: int = 2
+    sap_circuit_failure_threshold: int = 3
+    sap_circuit_reset_seconds: int = 30
+    # Optional JSON object mapping logical operations to tenant-specific OData
+    # paths. This keeps S/4HANA public/private cloud differences out of agents.
+    sap_operation_paths_json: str = ""
+
+    # Public URL advertised by MCP/A2A discovery documents.
+    agent_public_url: str = "http://localhost:8000"
+
+    # Operational objectives used by the readiness and business KPI reports.
+    agent_slo_success_rate: float = 0.99
+    agent_slo_p95_latency_ms: int = 5000
+    agent_slo_max_compensation_rate: float = 0.02
 
     @field_validator("database_url")
     @classmethod

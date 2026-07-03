@@ -5,7 +5,8 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.database import AsyncSessionLocal
-from app.db.models import AuditLog, Order, RefundLog, Ticket, TicketStatus, User, UserRole
+from app.db.models import AuditLog, RefundLog, Ticket, TicketStatus, User, UserRole
+from app.erp.process_generator import seed_return_to_refund_demo
 
 
 async def seed_data():
@@ -30,65 +31,13 @@ async def seed_data():
             await session.execute(select(User).where(User.email == "user@example.com"))
         ).scalar_one()
 
-        orders = [
-            Order(
-                id="789012",
-                user_id=user_demo.id,
-                amount=1299.0,
-                status="delivered",
-                items=[{
-                    "id": "item_1",
-                    "name": "Noise Cancelling Headphones Pro",
-                    "quantity": 1,
-                    "price": 1299.0,
-                    "imageUrl": "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200&h=200&fit=crop",
-                }],
-                shipping_address="Beijing Chaoyang Demo Street 101",
-                created_at=datetime.utcnow(),
-            ),
-            Order(
-                id="123456",
-                user_id=user_demo.id,
-                amount=299.0,
-                status="delivered",
-                items=[{
-                    "id": "item_2",
-                    "name": "Wireless Power Bank 20000mAh",
-                    "quantity": 1,
-                    "price": 299.0,
-                    "imageUrl": "https://images.unsplash.com/photo-1609091839311-d536801ff141?w=200&h=200&fit=crop",
-                }],
-                shipping_address="Shanghai Pudong Demo Road 202",
-                created_at=datetime.utcnow(),
-            ),
-            Order(
-                id="456789",
-                user_id=user_demo.id,
-                amount=4500.0,
-                status="delivered",
-                items=[{
-                    "id": "item_3",
-                    "name": "Flagship Phone X1",
-                    "quantity": 1,
-                    "price": 4500.0,
-                    "imageUrl": "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=200&h=200&fit=crop",
-                }],
-                shipping_address="Guangzhou Tianhe Demo Avenue 303",
-                created_at=datetime.utcnow(),
-            ),
-        ]
-
-        for order in orders:
-            result = await session.execute(select(Order).where(Order.id == order.id))
-            if not result.scalar_one_or_none():
-                print(f"Adding order: {order.id}")
-                session.add(order)
-        await session.commit()
+        erp_seed = await seed_return_to_refund_demo(session)
+        print(f"Seeded canonical Mini ERP dataset: {erp_seed['case_count']} cases")
 
         demo_tickets = [
-            Ticket(order_id="123456", requester_id=user_demo.id, thread_id="demo-thread-auto-refund", status=TicketStatus.COMPLETED, reason="damaged"),
-            Ticket(order_id="456789", requester_id=user_demo.id, thread_id="demo-thread-high-risk", status=TicketStatus.PENDING, reason="other"),
-            Ticket(order_id="789012", requester_id=user_demo.id, thread_id="demo-thread-rejected", status=TicketStatus.REJECTED, reason="not_received"),
+            Ticket(order_id="ERP-ORD-1001", requester_id=user_demo.id, thread_id="demo-thread-auto-refund", status=TicketStatus.COMPLETED, reason="damaged"),
+            Ticket(order_id="ERP-ORD-1003", requester_id=user_demo.id, thread_id="demo-thread-high-risk", status=TicketStatus.PENDING, reason="other"),
+            Ticket(order_id="ERP-ORD-1002", requester_id=user_demo.id, thread_id="demo-thread-rejected", status=TicketStatus.REJECTED, reason="not_received"),
         ]
         for ticket in demo_tickets:
             result = await session.execute(select(Ticket).where(Ticket.thread_id == ticket.thread_id))

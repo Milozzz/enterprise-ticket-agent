@@ -4,15 +4,21 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.agent.approval_service import authorize_generic_approval
+from app.agent.approval_tasks import (
+    complete_approval_task,
+    escalate_overdue_tasks,
+    serialize_approval_task,
+)
 from app.core.logging import get_logger
 from app.core.masking import mask_dict
 from app.db.database import AsyncSessionLocal
-from app.db.models import ApprovalDecision, AuditLog
+from app.db.models import ApprovalDecision, ApprovalTask, AuditLog
+from app.db.tenant_context import current_tenant_id
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -177,47 +183,95 @@ async def decide_generic_approval(payload: GenericApprovalRequest) -> dict:
         "message": "审批决策已记录。",
     }
     await _write_approval_audit(payload=payload, output=output, success=True)
+    await complete_approval_task(
+        decision_key,
+        action=payload.action,
+        reviewer_id=payload.reviewer_id,
+        comment=payload.comment,
+    )
     logger.info("generic_approval_recorded", request_id=payload.request_id, status=status)
     return output
 
 
+def _serialize_decision(decision: ApprovalDecision) -> dict[str, Any]:
+    policy_event = decision.policy_event or {}
+    return {
+        "decisionId": decision.id,
+        "decisionKey": decision.request_id,
+        "requestId": policy_event.get("original_request_id") or decision.request_id.split(":", 1)[0],
+        "scenarioId": decision.scenario_id,
+        "approvalType": decision.approval_type,
+        "stageId": policy_event.get("stage_id"),
+        "stageName": policy_event.get("stage_name"),
+        "action": decision.action,
+        "status": decision.status,
+        "reviewerId": decision.reviewer_id,
+        "reviewerRole": decision.reviewer_role,
+        "reviewRoles": (decision.review_roles or {}).get("roles", []),
+        "comment": decision.comment,
+        "threadId": decision.thread_id,
+        "createdAt": decision.created_at.isoformat() if decision.created_at else None,
+    }
+
+
 @router.get("/approval-center")
-async def list_approval_center(limit: int = 50) -> dict[str, Any]:
+async def list_approval_center(
+    limit: int = 50,
+    view: str = Query(default="approver", pattern="^(approver|requester|history)$"),
+    user_id: str = "",
+    user_role: str = "AGENT",
+    status: str = "",
+) -> dict[str, Any]:
+    tenant_id = current_tenant_id()
     async with AsyncSessionLocal() as session:
-        rows = (
+        task_rows = (
             await session.execute(
-                select(ApprovalDecision).order_by(ApprovalDecision.created_at.desc()).limit(min(max(limit, 1), 200))
+                select(ApprovalTask)
+                .where(ApprovalTask.tenant_id == tenant_id)
+                .order_by(ApprovalTask.due_at.asc())
+                .limit(min(max(limit * 4, 1), 800))
+            )
+        ).scalars().all()
+        decision_rows = (
+            await session.execute(
+                select(ApprovalDecision)
+                .where(ApprovalDecision.tenant_id == tenant_id)
+                .order_by(ApprovalDecision.created_at.desc())
+                .limit(min(max(limit, 1), 200))
             )
         ).scalars().all()
 
-    items = []
-    for decision in rows:
-        policy_event = decision.policy_event or {}
-        items.append(
-            {
-                "decisionId": decision.id,
-                "decisionKey": decision.request_id,
-                "requestId": policy_event.get("original_request_id") or decision.request_id.split(":", 1)[0],
-                "scenarioId": decision.scenario_id,
-                "approvalType": decision.approval_type,
-                "stageId": policy_event.get("stage_id"),
-                "stageName": policy_event.get("stage_name"),
-                "action": decision.action,
-                "status": decision.status,
-                "reviewerId": decision.reviewer_id,
-                "reviewerRole": decision.reviewer_role,
-                "reviewRoles": (decision.review_roles or {}).get("roles", []),
-                "comment": decision.comment,
-                "threadId": decision.thread_id,
-                "createdAt": decision.created_at.isoformat() if decision.created_at else None,
-            }
-        )
+    normalized_role = user_role.upper()
+    tasks = task_rows
+    if view == "approver":
+        tasks = [task for task in tasks if normalized_role in (task.assigned_roles or [])]
+        if not status:
+            tasks = [task for task in tasks if task.status in {"pending", "escalated"}]
+    elif view == "requester":
+        tasks = [task for task in tasks if task.requester_id == user_id]
+    if status:
+        tasks = [task for task in tasks if task.status == status]
+    tasks = tasks[: min(max(limit, 1), 200)]
+
+    task_items = [serialize_approval_task(task) for task in tasks]
+    history = [_serialize_decision(decision) for decision in decision_rows]
+    items = history if view == "history" else task_items
+    status_source = task_items if view != "history" else history
 
     return {
         "items": items,
+        "tasks": task_items,
+        "history": history,
         "count": len(items),
+        "view": view,
         "status_counts": {
-            "approved": sum(1 for item in items if item["status"] == "approved"),
-            "rejected": sum(1 for item in items if item["status"] == "rejected"),
+            key: sum(1 for item in status_source if item["status"] == key)
+            for key in ("pending", "escalated", "approved", "rejected")
         },
     }
+
+
+@router.post("/approval-center/escalate")
+async def sweep_approval_sla() -> dict[str, Any]:
+    count = await escalate_overdue_tasks(tenant_id=current_tenant_id())
+    return {"ok": True, "escalated": count}

@@ -1,0 +1,18 @@
+{
+  "version": "1.0",
+  "description": "Ground-truth policy retrieval set for recall and citation faithfulness",
+  "cases": [
+    {"id":"R001","query":"七天无理由退款需要满足什么条件","expected_policy_ids":["P001"]},
+    {"id":"R002","query":"商品破损后应该多久提交照片","expected_policy_ids":["P002"]},
+    {"id":"R003","query":"大额退款超过 500 元是否需要主管审批","expected_policy_ids":["P006"]},
+    {"id":"R004","query":"银行卡退款一般多久到账","expected_policy_ids":["P007"]},
+    {"id":"R005","query":"报销发票号码重复应该怎么处理","expected_policy_ids":["P015"]},
+    {"id":"R006","query":"生产数据库写权限需要哪些审批","expected_policy_ids":["P017"]},
+    {"id":"R007","query":"供应商发票和采购订单收货单金额不一致","expected_policy_ids":["P021"]},
+    {"id":"R008","query":"会计凭证为什么必须借贷平衡","expected_policy_ids":["P027"]},
+    {"id":"R009","query":"供应商银行账户变更如何复核","expected_policy_ids":["P032"]},
+    {"id":"R010","query":"用户输入要求忽略系统策略属于什么风险","expected_policy_ids":["P041"]},
+    {"id":"R011","query":"审批任务超过 SLA 后如何升级","expected_policy_ids":["P046"]},
+    {"id":"R012","query":"外部系统写接口如何保证重复请求不重复执行","expected_policy_ids":["P056"]}
+  ]
+}

@@ -118,8 +118,10 @@ export default function GenericApprovalPanel({
   const { currentRole, currentUserId } = useAuthStore();
   const [decision, setDecision] = useState<ApprovalAction | null>(null);
   const [decisionRecord, setDecisionRecord] = useState<DecisionRecord | null>(null);
+  const [completedStageIds, setCompletedStageIds] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [comment, setComment] = useState("");
 
   const normalizedApprovalChain = useMemo(
     () =>
@@ -130,9 +132,9 @@ export default function GenericApprovalPanel({
     [approvalChain]
   );
   const activeStage =
-    normalizedApprovalChain.find((stage) => canReview(currentRole, stage.roles)) ??
-    normalizedApprovalChain.find((stage) => stage.required !== false) ??
-    null;
+    normalizedApprovalChain.find(
+      (stage) => stage.required !== false && !completedStageIds.includes(stage.id)
+    ) ?? null;
   const effectiveReviewRoles = activeStage?.roles.length ? activeStage.roles : normalizeRoles(reviewRoles);
   const reviewerAllowed = canReview(currentRole, effectiveReviewRoles);
   const visibleStatus = decisionRecord?.status ?? (
@@ -173,31 +175,50 @@ export default function GenericApprovalPanel({
     setIsSubmitting(true);
     setError(null);
     try {
-      const res = await fetch("/api/agent/approval", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-User-Role": currentRole,
-          "X-User-Id": currentUserId,
-        },
+      if (!threadId) {
+        throw new Error("审批工作流缺少 threadId，无法从检查点恢复");
+      }
+      const res = await fetch("/api/chat", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          scenarioId,
-          approvalType,
-          requestId,
-          stageId: activeStage?.id,
           threadId,
           action,
           reviewerId: currentUserId,
           reviewerRole: currentRole,
+          comment,
         }),
       });
-      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         throw new Error(errorMessage(data, "审批请求失败"));
       }
+      await res.text();
+      setComment("");
 
-      setDecision(action);
-      setDecisionRecord(data as DecisionRecord);
+      const stageId = activeStage?.id;
+      const remainingStages = normalizedApprovalChain.filter(
+        (stage) => stage.required !== false && stage.id !== stageId && !completedStageIds.includes(stage.id)
+      );
+      if (action === "approve" && stageId) {
+        setCompletedStageIds((current) => [...current, stageId]);
+      }
+      if (action === "approve" && remainingStages.length > 0) {
+        setDecision(null);
+        setDecisionRecord(null);
+      } else {
+        setDecision(action);
+        setDecisionRecord({
+          ok: true,
+          requestId,
+          stageId,
+          stageName: activeStage?.name,
+          action,
+          status: action === "approve" ? "approved" : "rejected",
+          reviewerId: currentUserId,
+          reviewerRole: currentRole,
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "审批请求失败");
     } finally {
@@ -331,6 +352,20 @@ export default function GenericApprovalPanel({
             <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0" />
             当前角色仅有查看权限，审批动作需要授权审批角色处理。
           </div>
+        ) : null}
+
+        {reviewerAllowed && !decisionRecord ? (
+          <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+            审批意见
+            <textarea
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              maxLength={500}
+              rows={2}
+              placeholder="填写审批依据或补充说明"
+              className="min-h-16 resize-y rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-indigo-200"
+            />
+          </label>
         ) : null}
 
         {error ? (

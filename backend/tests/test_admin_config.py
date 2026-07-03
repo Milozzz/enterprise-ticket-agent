@@ -1,7 +1,11 @@
 import asyncio
 
 from app.api.routes.admin_config import (
+    get_all_scenario_eval_report,
+    get_policy_knowledge_base,
     get_scenario_admin_config,
+    get_tool_registry_report,
+    search_policy_knowledge_base,
     simulate_scenario_runtime,
     simulate_scenario_route,
     validate_scenario_payload,
@@ -9,6 +13,7 @@ from app.api.routes.admin_config import (
 from app.api.routes.admin_config import (
     RouteSimulationPayload,
     RuntimeSimulationPayload,
+    PolicySearchPayload,
     ScenarioConfigPayload,
 )
 
@@ -104,3 +109,32 @@ def test_admin_runtime_simulation_runs_configured_scenario_in_dry_run():
     assert runtime_result["business_request"]["requestId"] == "DRY_RUN_PERMISSION_REQUEST"
     assert runtime_result["tool_gateway_events"][0]["dry_run"] is True
     assert any(event["type"] == "business_request_card" for event in runtime_result["ui_events"])
+
+
+def test_admin_tool_registry_report_exposes_governance_metadata():
+    result = asyncio.run(get_tool_registry_report())
+
+    assert result["summary"]["tool_count"] >= 6
+    assert result["summary"]["high_risk_count"] >= 2
+    assert "action policy authorization" in result["governance"]["controls"]
+
+
+def test_admin_policy_knowledge_base_can_search_with_citations():
+    catalog = asyncio.run(get_policy_knowledge_base())
+    search = asyncio.run(
+        search_policy_knowledge_base(
+            PolicySearchPayload(query="refund approval over 500", topK=2, userRole="MANAGER")
+        )
+    )
+
+    assert catalog["summary"]["document_count"] >= 1
+    assert search["result"]["hit_count"] == 2
+    assert search["result"]["hits"][0]["citation"]["policy_id"]
+
+
+def test_admin_all_scenario_eval_report_summarizes_cases():
+    report = asyncio.run(get_all_scenario_eval_report())["eval_report"]
+
+    assert report["scenario_count"] >= 2
+    assert report["case_count"] >= 2
+    assert "avg_latency_ms" in report

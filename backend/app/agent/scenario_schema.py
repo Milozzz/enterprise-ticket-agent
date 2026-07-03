@@ -39,10 +39,26 @@ RUNTIME_V2_SCHEMA = {
             "required": ["name", "args"],
             "properties": {"name": {"type": "string"}, "args": {"type": "object"}},
         },
+        "tools": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "args"],
+                "properties": {"name": {"type": "string"}, "args": {"type": "object"}},
+            },
+        },
         "policy": {
             "type": "object",
             "required": ["name", "args"],
             "properties": {"name": {"type": "string"}, "args": {"type": "object"}},
+        },
+        "policies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "args"],
+                "properties": {"name": {"type": "string"}, "args": {"type": "object"}},
+            },
         },
         "reply_template": {"type": "string"},
         "state_outputs": {"type": "object"},

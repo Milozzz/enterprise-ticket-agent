@@ -33,6 +33,7 @@ const RefundTimeline = dyn(() => import("@/components/generative/RefundTimeline"
 const EmailPreview = dyn(() => import("@/components/generative/EmailPreview"));
 const BusinessRequestCard = dyn(() => import("@/components/generative/BusinessRequestCard"));
 const GenericApprovalPanel = dyn(() => import("@/components/generative/GenericApprovalPanel"));
+const PolicyCards = dyn(() => import("@/components/generative/PolicyCards"));
 
 export default function ChatPage() {
   const { currentRole, currentUserId } = useAuthStore();
@@ -148,6 +149,7 @@ export default function ChatPage() {
       case "EmailPreview":        inner = <EmailPreview data={p} />; break;
       case "BusinessRequestCard": inner = <BusinessRequestCard {...p} />; break;
       case "GenericApprovalPanel": inner = <GenericApprovalPanel {...p} />; break;
+      case "PolicyCards":         inner = <PolicyCards {...p} />; break;
       default:                    inner = null;
     }
     if (inner == null) return null;

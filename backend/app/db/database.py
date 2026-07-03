@@ -1,6 +1,8 @@
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session
 from app.core.config import get_settings
+from app.db.tenant_context import apply_tenant_context, current_tenant_id
 
 settings = get_settings()
 
@@ -29,6 +31,18 @@ class Base(DeclarativeBase):
     pass
 
 
+@event.listens_for(Session, "after_begin")
+def _set_postgres_tenant_context(session, transaction, connection) -> None:
+    """Apply RLS context to every ORM transaction, including direct sessions."""
+
+    del session, transaction
+    if connection.dialect.name == "postgresql":
+        connection.execute(
+            text("SELECT set_config('app.current_tenant', :tenant_id, true)"),
+            {"tenant_id": current_tenant_id()},
+        )
+
+
 async def init_db() -> None:
     """初始化数据库，创建所有表（开发环境使用，生产环境用 Alembic）"""
     async with engine.begin() as conn:
@@ -43,6 +57,7 @@ async def get_db():
     try:
         async with AsyncSessionLocal() as session:
             try:
+                await apply_tenant_context(session, settings.default_tenant_id)
                 yield session
                 await session.commit()
             except Exception:

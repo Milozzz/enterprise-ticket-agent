@@ -13,6 +13,7 @@ from app.core.idempotency import acquire_idempotency_key, stable_idempotency_key
 from app.core.logging import get_logger
 from app.core.policy import evaluate_refund_review_policy
 from app.db.database import AsyncSessionLocal
+from app.agent.dependencies import resolve_session_factory
 from app.db.models import Ticket, TicketStatus, User, UserRole, UserMemory
 from sqlalchemy import select
 
@@ -28,7 +29,7 @@ async def _upsert_ticket(order_id: str, user_role: str, thread_id: str, reason: 
     acquired = await acquire_idempotency_key(idem_key, ttl_seconds=86400)
     if not acquired:
         for _ in range(5):
-            async with AsyncSessionLocal() as session:
+            async with resolve_session_factory(AsyncSessionLocal)() as session:
                 result = await session.execute(select(Ticket).where(Ticket.thread_id == thread_id))
                 existing = result.scalar_one_or_none()
                 if existing:
@@ -38,7 +39,7 @@ async def _upsert_ticket(order_id: str, user_role: str, thread_id: str, reason: 
         logger.warning("ticket_duplicate_in_flight", thread_id=thread_id, idempotency_key=idem_key)
         return 0
 
-    async with AsyncSessionLocal() as session:
+    async with resolve_session_factory(AsyncSessionLocal)() as session:
         # 如果同一 thread 已有工单，直接复用
         stmt = select(Ticket).where(Ticket.thread_id == thread_id)
         result = await session.execute(stmt)
@@ -93,7 +94,7 @@ async def _load_user_memory(user_id: str) -> dict:
         return {}
 
     try:
-        async with AsyncSessionLocal() as session:
+        async with resolve_session_factory(AsyncSessionLocal)() as session:
             result = await session.execute(
                 select(UserMemory).where(UserMemory.user_id == uid)
             )
@@ -189,6 +190,7 @@ async def check_risk_node(state: AgentState) -> dict:
             risk_score=risk_data.get("riskScore", 0),
             risk_level=risk_data.get("riskLevel", "low"),
             user_history=user_mem,
+            routing_key=str(get_state_val(state, "thread_id", "global") or "global"),
         )
         risk_data["policyDecision"] = review_policy.to_audit_event()
         if review_policy.requires_human_review:
@@ -230,7 +232,9 @@ async def check_risk_node(state: AgentState) -> dict:
             logger.info("upsert_ticket_result", db_ticket_id=db_ticket_id, order_id=order_id)
         except Exception as ticket_err:
             logger.error("upsert_ticket_failed", error=str(ticket_err), order_id=order_id)
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
             db_ticket_id = 0
 
         # 如果需要人工审批，额外发送 ApprovalPanel 组件

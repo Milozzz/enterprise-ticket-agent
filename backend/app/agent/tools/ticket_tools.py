@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from app.db.database import AsyncSessionLocal
 from app.db.models import Ticket, User, Order, TicketStatus
+from app.erp.identity import resolve_order_id
 from sqlalchemy import case, select
 import asyncio
 import threading
@@ -57,6 +58,8 @@ def get_ticket_status(order_id: str) -> dict:
 
 async def _get_ticket_status_async(order_id: str) -> dict:
     async with AsyncSessionLocal() as session:
+        identity = await resolve_order_id(session, order_id)
+        canonical_order_id = identity.canonical_id
         # 同一订单可能有多条工单（每次新 thread 会新建 PENDING）。按业务优先级取「最应展示」的一条：
         # COMPLETED > APPROVED > REJECTED > PENDING，同优先级再按创建时间新→旧
         _prio = case(
@@ -67,7 +70,7 @@ async def _get_ticket_status_async(order_id: str) -> dict:
         )
         stmt = (
             select(Ticket)
-            .where(Ticket.order_id == order_id)
+            .where(Ticket.order_id == canonical_order_id)
             .order_by(_prio.desc(), Ticket.created_at.desc())
             .limit(1)
         )
@@ -76,7 +79,7 @@ async def _get_ticket_status_async(order_id: str) -> dict:
 
         if not ticket:
             # 没有工单，查询订单本身是否存在
-            order_stmt = select(Order).where(Order.id == order_id)
+            order_stmt = select(Order).where(Order.id == canonical_order_id)
             order_result = await session.execute(order_stmt)
             order = order_result.scalar_one_or_none()
 
@@ -85,6 +88,7 @@ async def _get_ticket_status_async(order_id: str) -> dict:
 
             return {
                 "orderId": order_id,
+                "canonicalOrderId": canonical_order_id,
                 "orderStatus": order.status,
                 "hasTicket": False,
                 "message": f"订单 #{order_id} 目前没有退款工单记录",
@@ -115,6 +119,7 @@ async def _get_ticket_status_async(order_id: str) -> dict:
             "hasTicket": True,
             "ticketId": ticket.id,
             "orderId": order_id,
+            "canonicalOrderId": canonical_order_id,
             "status": status.value if hasattr(status, "value") else str(status),
             "statusLabel": label,
             "statusEmoji": emoji,

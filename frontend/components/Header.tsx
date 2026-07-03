@@ -9,7 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import Link from "next/link";
-import { ShieldCheck, User, Headset, Sparkles, LayoutDashboard, Settings2, FlaskConical, ClipboardCheck, Boxes } from "lucide-react";
+import { ShieldCheck, User, Headset, Sparkles, LayoutDashboard, Settings2, FlaskConical, ClipboardCheck, Boxes, Database, Cable, CopyCheck, ChartNoAxesCombined, LockKeyhole, Landmark } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function Header() {
@@ -19,6 +19,8 @@ export function Header() {
     USER: { label: "普通用户", icon: User, color: "text-blue-500", bg: "bg-blue-50" },
     AGENT: { label: "客服人员", icon: Headset, color: "text-green-500", bg: "bg-green-50" },
     MANAGER: { label: "财务主管", icon: ShieldCheck, color: "text-purple-500", bg: "bg-purple-50" },
+    SECURITY: { label: "安全审批人", icon: LockKeyhole, color: "text-red-500", bg: "bg-red-50" },
+    FINANCE: { label: "财务审批人", icon: Landmark, color: "text-amber-600", bg: "bg-amber-50" },
   };
 
   return (
@@ -65,6 +67,30 @@ export function Header() {
             <Link href="/admin/platform" className="inline-flex items-center gap-2">
               <Boxes className="h-4 w-4" />
               Platform
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden 2xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/business-data" className="inline-flex items-center gap-2">
+              <Database className="h-4 w-4" />
+              Data
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden 2xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/master-data" className="inline-flex items-center gap-2">
+              <CopyCheck className="h-4 w-4" />
+              MDG
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden 2xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/connectors" className="inline-flex items-center gap-2">
+              <Cable className="h-4 w-4" />
+              Connectors
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="hidden 2xl:inline-flex text-slate-600" asChild>
+            <Link href="/admin/operations" className="inline-flex items-center gap-2">
+              <ChartNoAxesCombined className="h-4 w-4" />
+              Operations
             </Link>
           </Button>
           <div className="hidden md:flex items-center gap-2 mr-2">

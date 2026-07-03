@@ -95,7 +95,8 @@ export type UiEventType =
   | "RefundTimeline"
   | "EmailPreview"
   | "BusinessRequestCard"
-  | "GenericApprovalPanel";
+  | "GenericApprovalPanel"
+  | "PolicyCards";
 
 export interface UiEvent {
   type: UiEventType | string;

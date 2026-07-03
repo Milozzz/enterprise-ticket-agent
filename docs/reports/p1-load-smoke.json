@@ -1,0 +1,24 @@
+{
+  "measured_at": "2026-07-03",
+  "http": {
+    "profile": "backend/locustfile.py",
+    "users": 20,
+    "spawn_rate_per_second": 5,
+    "duration_seconds": 20,
+    "requests": 526,
+    "failures": 0,
+    "requests_per_second": 27.5,
+    "aggregate_latency_ms": {"average": 196.503, "p50": 13, "p95": 2100, "max": 2325.405},
+    "chat_latency_ms": {"requests": 45, "average": 2089.098, "p50": 2100, "p95": 2200, "max": 2325.405},
+    "health_latency_ms": {"requests": 150, "average": 20.214, "p50": 12, "p95": 61, "max": 221.653}
+  },
+  "runtime_dry_run": {
+    "requests": 200,
+    "concurrency": 20,
+    "successes": 200,
+    "failures": 0,
+    "requests_per_second": 6324.59,
+    "latency_ms": {"average": 0.145, "p50": 0.134, "p95": 0.147, "max": 1.902}
+  },
+  "scope": "Developer-machine baseline with SQLite and no external LLM keys. It is reproducible evidence, not a production capacity claim."
+}

@@ -8,17 +8,20 @@ summarize_session_node：会话结束后压缩对话历史写入 UserMemory.note
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from app.agent.dependencies import get_agent_dependencies, resolve_session_factory
+from app.agent.long_term_memory import capture_explicit_preferences
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.core.logging import get_logger
 from app.core.config import get_settings
 from app.db.database import AsyncSessionLocal
 from app.db.models import UserMemory
+from app.llm.gateway import LLMCallContext
+from app.llm.prompt_registry import get_prompt_registry
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -35,22 +38,38 @@ _MERGE_SYSTEM = """你是一个摘要助手。
 """
 
 
-async def _call_llm(system: str, user: str) -> str | None:
+async def _call_llm(
+    system: str,
+    user: str,
+    context: LLMCallContext | None = None,
+) -> str | None:
     """调用 LLM 生成摘要（8s 超时）"""
-    if not settings.google_api_key:
+    provider_keys = (
+        settings.google_api_key,
+        settings.openai_api_key,
+        settings.anthropic_api_key,
+    )
+    if not any(provider_keys):
         return None
     try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
+        node_name = "summarize_merge" if system == _MERGE_SYSTEM else "summarize_session"
+        prompt = get_prompt_registry().select(
+            node_name,
+            system,
+            routing_key=(context.thread_id if context else user),
+            default_version=f"{node_name}-v1",
+        )
+        call = await get_agent_dependencies().llm.ainvoke(
+            node_name,
+            [SystemMessage(content=prompt.template), HumanMessage(content=user)],
+            context=context,
             temperature=0.0,
+            timeout_seconds=8.0,
+            prompt_version=prompt.version,
+            prompt_variant=prompt.variant,
+            prompt_rollout_bucket=prompt.rollout_bucket,
         )
-        response = await asyncio.wait_for(
-            llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)]),
-            timeout=8.0,
-        )
-        return response.content.strip()
+        return str(call.output.content).strip()
     except Exception as e:
         logger.warning("summarize_llm_error", error=str(e))
         return None
@@ -92,13 +111,18 @@ async def summarize_session_node(state: AgentState) -> dict:
     logger.info("summarize_session_start", user_id=user_id, msg_count=len(messages))
 
     # 1. 压缩本次对话
-    new_summary = await _call_llm(_SUMMARIZE_SYSTEM, conversation_text)
+    context = LLMCallContext(
+        thread_id=str(get_state_val(state, "thread_id", "unknown")),
+        trace_id=str(get_state_val(state, "trace_id", "") or "") or None,
+        tenant_id=str(get_state_val(state, "tenant_id", "") or "") or None,
+    )
+    new_summary = await _call_llm(_SUMMARIZE_SYSTEM, conversation_text, context)
     if not new_summary:
         return {"current_step": "summarize_done"}
 
     # 2. 读取旧摘要，合并
     try:
-        async with AsyncSessionLocal() as session:
+        async with resolve_session_factory(AsyncSessionLocal)() as session:
             from sqlalchemy import select
             result = await session.execute(
                 select(UserMemory).where(UserMemory.user_id == uid)
@@ -110,6 +134,7 @@ async def summarize_session_node(state: AgentState) -> dict:
             merged = await _call_llm(
                 _MERGE_SYSTEM,
                 f"旧摘要：{old_notes}\n\n新摘要：{new_summary}",
+                context,
             )
             final_notes = merged or f"{old_notes} | {new_summary}"
         else:
@@ -117,7 +142,7 @@ async def summarize_session_node(state: AgentState) -> dict:
 
         # 3. 写回 DB
         now = datetime.utcnow()
-        async with AsyncSessionLocal() as session:
+        async with resolve_session_factory(AsyncSessionLocal)() as session:
             result = await session.execute(
                 select(UserMemory).where(UserMemory.user_id == uid)
             )
@@ -139,6 +164,13 @@ async def summarize_session_node(state: AgentState) -> dict:
             await session.commit()
 
         logger.info("summarize_session_done", user_id=user_id, summary_len=len(final_notes))
+        await capture_explicit_preferences(
+            user_id=str(user_id),
+            conversation_text=conversation_text,
+            thread_id=str(get_state_val(state, "thread_id", "unknown")),
+            tenant_id=str(get_state_val(state, "tenant_id", "default") or "default"),
+            session_factory=resolve_session_factory(AsyncSessionLocal),
+        )
 
     except Exception as e:
         logger.warning("summarize_session_db_error", error=str(e), user_id=user_id)

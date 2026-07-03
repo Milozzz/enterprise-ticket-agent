@@ -25,13 +25,18 @@ from app.core.config import get_settings
 _bearer = HTTPBearer(auto_error=False)
 
 
-def create_access_token(user_id: str | int, role: str = "USER") -> str:
+def create_access_token(
+    user_id: str | int,
+    role: str = "USER",
+    tenant_id: str | None = None,
+) -> str:
     """生成 JWT access token（供 /auth/login 等接口签发）"""
     settings = get_settings()
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "role": role.upper(),
+        "tenant_id": tenant_id or settings.default_tenant_id,
         "iat": now,
         "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
@@ -66,7 +71,11 @@ async def get_current_user(
     """
     import os
     if os.environ.get("TESTING") == "1":
-        return {"user_id": "1", "role": "AGENT"}
+        return {
+            "user_id": "1",
+            "role": "AGENT",
+            "tenant_id": os.environ.get("TEST_TENANT_ID", get_settings().default_tenant_id),
+        }
 
     if credentials is None:
         raise HTTPException(
@@ -83,7 +92,11 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token payload 缺少 sub 字段",
         )
-    return {"user_id": user_id, "role": role}
+    return {
+        "user_id": user_id,
+        "role": role,
+        "tenant_id": payload.get("tenant_id") or get_settings().default_tenant_id,
+    }
 
 
 async def get_optional_user(
@@ -95,12 +108,20 @@ async def get_optional_user(
     """
     import os
     if os.environ.get("TESTING") == "1":
-        return {"user_id": "1", "role": "AGENT"}
+        return {
+            "user_id": "1",
+            "role": "AGENT",
+            "tenant_id": os.environ.get("TEST_TENANT_ID", get_settings().default_tenant_id),
+        }
 
     if credentials is None:
         return None
     try:
         payload = _decode_token(credentials.credentials)
-        return {"user_id": payload.get("sub", ""), "role": payload.get("role", "USER")}
+        return {
+            "user_id": payload.get("sub", ""),
+            "role": payload.get("role", "USER"),
+            "tenant_id": payload.get("tenant_id") or get_settings().default_tenant_id,
+        }
     except HTTPException:
         return None

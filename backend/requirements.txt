@@ -14,10 +14,13 @@ aiosqlite
 alembic
 redis[hiredis]
 langgraph-checkpoint-redis
+langgraph-checkpoint-postgres
+psycopg[binary,pool]
 structlog
 python-dotenv
 httpx
 tenacity
 langfuse
 numpy
+pgvector>=0.3.6
 python-jose[cryptography]

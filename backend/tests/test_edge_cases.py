@@ -39,9 +39,9 @@ class TestPermissions:
         for role in ["USER", "AGENT", "MANAGER"]:
             assert check_permission(role, "lookup_order") is True
 
-    def test_unknown_action_is_allowed(self):
-        # 未定义的 action 默认放行
-        assert check_permission("USER", "some_undefined_action") is True
+    def test_unknown_action_is_denied(self):
+        # Policy-as-Code 对未知高风险动作采用 fail-closed。
+        assert check_permission("USER", "some_undefined_action") is False
 
     def test_require_permission_raises_on_deny(self):
         with pytest.raises(PermissionDeniedError) as exc_info:

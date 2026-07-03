@@ -20,8 +20,54 @@ services:
         sync: false
       - key: SECRET_KEY
         generateValue: true
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: FIELD_ENCRYPTION_KEY
+        generateValue: true
+      - key: FIELD_ENCRYPTION_KEY_ID
+        value: render-v1
+      - key: KMS_PROVIDER
+        value: local
+      - key: PII_DEFAULT_RETENTION_DAYS
+        value: "365"
+      - key: AGENT_PUBLIC_URL
+        sync: false
+      - key: A2A_WORKER_ENABLED
+        value: "true"
+      - key: A2A_WORKER_TENANTS
+        value: TENANT-DEMO-COMMERCE
+      - key: A2A_ALLOWED_CALLBACK_HOSTS
+        sync: false
+      - key: A2A_DEFAULT_CALLBACK_URL
+        sync: false
+      - key: A2A_CALLBACK_BEARER_TOKEN
+        sync: false
       - key: GOOGLE_API_KEY
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: LLM_DEFAULT_PROVIDER
+        value: gemini
+      - key: LLM_NODE_ROUTES_JSON
+        sync: false
+      - key: LLM_PRICE_CATALOG_JSON
+        sync: false
+      - key: TOOL_CIRCUIT_FAILURE_THRESHOLD
+        value: "3"
+      - key: TOOL_CIRCUIT_RESET_SECONDS
+        value: "30"
+      - key: APPROVAL_ESCALATION_WORKER_ENABLED
+        value: "true"
+      - key: APPROVAL_ESCALATION_POLL_SECONDS
+        value: "30"
+      - key: AGENT_JOB_WORKER_ENABLED
+        value: "true"
+      - key: AGENT_JOB_POLL_SECONDS
+        value: "1"
+      - key: AGENT_JOB_MAX_ATTEMPTS
+        value: "3"
       - key: LANGFUSE_PUBLIC_KEY
         sync: false
       - key: LANGFUSE_SECRET_KEY
@@ -32,10 +78,32 @@ services:
         sync: false
       - key: GMAIL_APP_PASSWORD
         sync: false
+      - key: SAP_CONNECTOR_MODE
+        value: mock
+      - key: SAP_BASE_URL
+        sync: false
+      - key: SAP_AUTH_TYPE
+        value: api_key
+      - key: SAP_API_KEY
+        sync: false
+      - key: SAP_CLIENT_ID
+        sync: false
+      - key: SAP_CLIENT_SECRET
+        sync: false
+      - key: SAP_TOKEN_URL
+        sync: false
+      - key: SAP_READ_ONLY
+        value: "true"
+      - key: SAP_SHADOW_WRITES
+        value: "true"
+      - key: SAP_OPERATION_PATHS_JSON
+        value: "{}"
       - key: DATABASE_URL
         fromDatabase:
           name: enterprise-ticket-agent-db
           property: connectionString
+      - key: LANGGRAPH_STRICT_MSGPACK
+        value: "true"
       - key: REDIS_URL
         fromService:
           type: redis

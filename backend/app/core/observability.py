@@ -14,7 +14,6 @@ Langfuse CallbackHandler 会自动追踪：
 """
 
 import os
-from functools import lru_cache
 
 from app.core.logging import get_logger
 

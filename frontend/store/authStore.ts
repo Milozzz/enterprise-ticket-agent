@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type UserRole = 'USER' | 'AGENT' | 'MANAGER';
+export type UserRole = 'USER' | 'AGENT' | 'MANAGER' | 'SECURITY' | 'FINANCE';
 
 interface AuthState {
   currentRole: UserRole;

@@ -42,9 +42,7 @@ class TestJWT:
         """TESTING=1 时 get_optional_user 直接返回 user_id=1"""
         import asyncio
         from app.core.auth import get_optional_user
-        result = asyncio.get_event_loop().run_until_complete(
-            get_optional_user(credentials=None)
-        )
+        result = asyncio.run(get_optional_user(credentials=None))
         assert result is not None
         assert result["user_id"] == "1"   # 必须是整数字符串，不是 "dev_user"
         assert result["role"] in ("AGENT", "MANAGER", "USER")
@@ -53,9 +51,7 @@ class TestJWT:
         """user_id 必须能被 int() 转换，否则 UserMemory FK 查询会静默失败"""
         import asyncio
         from app.core.auth import get_optional_user
-        result = asyncio.get_event_loop().run_until_complete(
-            get_optional_user(credentials=None)
-        )
+        result = asyncio.run(get_optional_user(credentials=None))
         assert result is not None
         # 这是核心断言：保证 _try_int(user_id) 不返回 None
         assert int(result["user_id"]) >= 0
@@ -125,9 +121,7 @@ class TestRateLimiting:
             next_called = True
             return MagicMock()
 
-        asyncio.get_event_loop().run_until_complete(
-            middleware.dispatch(req, mock_next)
-        )
+        asyncio.run(middleware.dispatch(req, mock_next))
         assert next_called
 
     def test_rate_limit_skips_in_testing_mode(self):
@@ -147,7 +141,5 @@ class TestRateLimiting:
             next_called = True
             return MagicMock()
 
-        asyncio.get_event_loop().run_until_complete(
-            middleware.dispatch(req, mock_next)
-        )
+        asyncio.run(middleware.dispatch(req, mock_next))
         assert next_called

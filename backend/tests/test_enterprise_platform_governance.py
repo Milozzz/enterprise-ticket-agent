@@ -1,4 +1,7 @@
 import asyncio
+import json
+
+import pytest
 
 from app.agent.approval_service import authorize_generic_approval
 from app.agent.mcp_adapter import list_mcp_compatible_tools
@@ -7,7 +10,12 @@ from app.agent.scenario_eval import run_scenario_eval
 from app.agent.scenario_registry import get_default_registry
 from app.agent.scenario_schema import RUNTIME_V2_SCHEMA
 from app.agent.scenario_templates import instantiate_template, list_scenario_templates
-from app.agent.scenario_versions import create_scenario_version, list_scenario_versions
+from app.agent.scenario_versions import (
+    create_scenario_version,
+    diff_scenario_version,
+    list_scenario_versions,
+    publish_scenario,
+)
 
 
 def test_runtime_v2_schema_declares_required_platform_contract():
@@ -63,6 +71,47 @@ def test_scenario_version_snapshots_are_file_backed(tmp_path, monkeypatch):
     assert versions[0].action == "test"
 
 
+def test_scenario_version_diff_compares_snapshot_to_current_config(tmp_path, monkeypatch):
+    import app.agent.scenario_versions as scenario_versions
+    from app.agent.scenario_registry import ensure_scenario_storage_initialized
+
+    monkeypatch.setattr(scenario_versions, "DEFAULT_SCENARIO_DIR", tmp_path)
+    monkeypatch.setattr(scenario_versions, "VERSION_DIR", tmp_path / "_versions")
+    ensure_scenario_storage_initialized(tmp_path)
+    version = create_scenario_version(
+        get_default_registry().get("permission_request"),
+        action="before_edit",
+        author="pytest",
+    )
+
+    current_path = tmp_path / "permission_request.json"
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    current["name"] = "Edited Permission Scenario"
+    current_path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    diff = diff_scenario_version("permission_request", version.version_id)
+
+    assert diff["change_count"] >= 1
+    assert any(change["path"] == "name" for change in diff["changes"])
+
+
+def test_publish_rejects_invalid_current_scenario_config(tmp_path, monkeypatch):
+    import app.agent.scenario_versions as scenario_versions
+    from app.agent.scenario_registry import ensure_scenario_storage_initialized
+
+    monkeypatch.setattr(scenario_versions, "DEFAULT_SCENARIO_DIR", tmp_path)
+    monkeypatch.setattr(scenario_versions, "VERSION_DIR", tmp_path / "_versions")
+    ensure_scenario_storage_initialized(tmp_path)
+
+    current_path = tmp_path / "permission_request.json"
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    current["runtime"] = {}
+    current_path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        publish_scenario("permission_request", author="pytest")
+
+
 def test_template_marketplace_instantiates_runtime_ready_scenario():
     template_ids = {template["id"] for template in list_scenario_templates()}
     scenario = instantiate_template("access_governance", "custom_access_governance")
@@ -86,9 +135,12 @@ def test_persistent_scenario_storage_can_seed_bundled_configs(tmp_path):
 def test_scenario_level_eval_runs_against_dry_run_runtime():
     result = asyncio.run(run_scenario_eval("reimbursement"))
 
-    assert result["case_count"] == 1
-    assert result["passed_count"] == 1
+    assert result["case_count"] == 3
+    assert result["passed_count"] == 3
     assert result["pass_rate"] == 1.0
+    assert result["results"][0]["output"]["trajectory"]["tool_sequence"] == [
+        "create_reimbursement_request"
+    ]
 
 
 def test_mcp_adapter_exports_tool_gateway_metadata():

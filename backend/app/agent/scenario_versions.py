@@ -109,6 +109,9 @@ def publish_scenario(
     scenario_data = scenario.to_dict()
     scenario_data["status"] = "active"
     published = ScenarioConfig.from_dict(scenario_data)
+    report = validate_scenario_config(published)
+    if not report.valid:
+        raise ValueError(f"Scenario '{scenario_id}' has validation errors and cannot be published.")
     _write_current_scenario(published)
     reload_default_registry()
     return create_scenario_version(published, action="publish", author=author, note=note)
@@ -133,6 +136,24 @@ def rollback_scenario(
     )
 
 
+def diff_scenario_version(scenario_id: str, version_id: str) -> dict[str, Any]:
+    """Compare a saved scenario version with the current editable scenario."""
+    payload = get_scenario_version(scenario_id, version_id)
+    version_scenario = payload["scenario"]
+    current_scenario = _read_current_scenario(scenario_id).to_dict()
+    changes = _diff_values(version_scenario, current_scenario)
+    return {
+        "scenario_id": scenario_id,
+        "version_id": version_id,
+        "change_count": len(changes),
+        "changes": changes,
+        "legend": {
+            "version_value": "Value stored in the selected version.",
+            "current_value": "Value currently active/editable in the scenario config.",
+        },
+    }
+
+
 def _read_current_scenario(scenario_id: str) -> ScenarioConfig:
     ensure_scenario_storage_initialized(DEFAULT_SCENARIO_DIR)
     path = DEFAULT_SCENARIO_DIR / f"{scenario_id}.json"
@@ -150,6 +171,43 @@ def _write_current_scenario(scenario: ScenarioConfig) -> None:
         json.dump(scenario.to_dict(), f, ensure_ascii=False, indent=2)
         f.write("\n")
     shutil.move(str(tmp_path), str(path))
+
+
+def _diff_values(left: Any, right: Any, path: str = "") -> list[dict[str, Any]]:
+    if isinstance(left, dict) and isinstance(right, dict):
+        changes: list[dict[str, Any]] = []
+        for key in sorted(set(left) | set(right)):
+            next_path = f"{path}.{key}" if path else str(key)
+            if key not in left:
+                changes.append({"path": next_path, "change_type": "added", "version_value": None, "current_value": right[key]})
+            elif key not in right:
+                changes.append({"path": next_path, "change_type": "removed", "version_value": left[key], "current_value": None})
+            else:
+                changes.extend(_diff_values(left[key], right[key], next_path))
+        return changes
+
+    if isinstance(left, list) and isinstance(right, list):
+        if left == right:
+            return []
+        return [
+            {
+                "path": path,
+                "change_type": "changed",
+                "version_value": left,
+                "current_value": right,
+            }
+        ]
+
+    if left != right:
+        return [
+            {
+                "path": path,
+                "change_type": "changed",
+                "version_value": left,
+                "current_value": right,
+            }
+        ]
+    return []
 
 
 def _version_path(scenario_id: str, version_id: str) -> Path:
