@@ -57,7 +57,8 @@ router = APIRouter()
 def require_admin_api_key(
     admin_api_key: Annotated[str | None, Header(alias="X-Admin-API-Key")] = None,
 ) -> None:
-    if os.getenv("TESTING") == "1":
+    from app.core.config import testing_mode_active
+    if testing_mode_active():
         return
     configured = get_settings().admin_api_key
     if configured and (not admin_api_key or not hmac.compare_digest(configured, admin_api_key)):

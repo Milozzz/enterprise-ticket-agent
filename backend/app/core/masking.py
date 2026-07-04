@@ -70,9 +70,12 @@ def mask_dict(data: dict | None, depth: int = 0) -> dict | None:
     """
     递归脱敏字典（最多递归 3 层，避免大型嵌套对象性能问题）。
     返回新字典，不修改原始对象。
+    超过深度上限时返回占位符而非原始数据，避免深层 PII（如 erpContext）未脱敏泄漏。
     """
-    if not data or depth > 3:
+    if not data:
         return data
+    if depth > 3:
+        return {"_masked": "depth_limit_exceeded"} if isinstance(data, dict) else data
     result: dict = {}
     for k, v in data.items():
         if isinstance(v, dict):

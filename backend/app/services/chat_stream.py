@@ -97,8 +97,17 @@ async def stream_agent(
                     duration_ms = int((time.monotonic() - node_start_times.pop(event_name)) * 1000)
 
                 if event_name in NODE_STATE_MAP:
+                    target_state = NODE_STATE_MAP[event_name]
                     try:
-                        refund_state = transition(refund_state, NODE_STATE_MAP[event_name])
+                        # 退款执行前必须先经过 APPROVED（含自动审批）。若当前尚未 APPROVED，
+                        # 先补一次合法的 →APPROVED 转移，避免 RISK_EVALUATED/PENDING_APPROVAL
+                        # 直接跳 REFUNDED 触发非法转移、审计里 _refund_state 卡住。
+                        if target_state is RefundState.REFUNDED and refund_state in (
+                            RefundState.RISK_EVALUATED,
+                            RefundState.PENDING_APPROVAL,
+                        ):
+                            refund_state = transition(refund_state, RefundState.APPROVED)
+                        refund_state = transition(refund_state, target_state)
                     except InvalidStateTransitionError as exc:
                         logger.warning("state_machine_invalid_transition", error=str(exc))
                     if isinstance(output, dict):
@@ -202,7 +211,15 @@ async def stream_resume(
                         continue
                     input_data = event.get("data", {}).get("input")
                     output = event.get("data", {}).get("output")
-                    await audit_writer(request.thread_id, event_name, event_type, input_data, output)
+                    # 带上 trace_id，让审批阶段的审计记录能与主链路 trace 关联。
+                    await audit_writer(
+                        request.thread_id,
+                        event_name,
+                        event_type,
+                        input_data,
+                        output,
+                        trace_id=getattr(request, "trace_id", None) or request.thread_id,
+                    )
                     if isinstance(output, dict):
                         for ui_event in output.get("ui_events", []):
                             yield encode_sse("ui", ui_event_payload(ui_event))

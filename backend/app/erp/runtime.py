@@ -124,6 +124,31 @@ class _CircuitState:
 
 _CIRCUITS: dict[str, _CircuitState] = {}
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+# Per-connector 长连接客户端，复用 TCP/TLS 连接池，避免每请求重建握手。
+_HTTP_CLIENTS: dict[str, httpx.AsyncClient] = {}
+
+
+def _http_client(config: "ConnectorRuntimeConfig") -> httpx.AsyncClient:
+    key = f"{config.base_url}|{config.verify_tls}|{config.timeout_seconds}"
+    client = _HTTP_CLIENTS.get(key)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            timeout=config.timeout_seconds,
+            verify=config.verify_tls,
+            follow_redirects=False,
+        )
+        _HTTP_CLIENTS[key] = client
+    return client
+
+
+async def close_erp_http_clients() -> None:
+    """Close pooled connector clients on shutdown."""
+    for client in list(_HTTP_CLIENTS.values()):
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+    _HTTP_CLIENTS.clear()
 
 
 def _parse_operation_paths(raw: str | Mapping[str, Any] | None) -> dict[str, str]:
@@ -378,47 +403,51 @@ class SAPODataConnector:
         started = time.perf_counter()
         attempts = 0
         try:
-            async with httpx.AsyncClient(
-                timeout=self.config.timeout_seconds,
-                verify=self.config.verify_tls,
-                follow_redirects=False,
-            ) as client:
-                auth, auth_headers = await self._authentication(client, principal_token)
-                headers.update(auth_headers)
-                cookies = None
-                if is_write:
-                    csrf_headers, cookies = await self._fetch_csrf_token(client, url, auth, headers)
-                    headers.update(csrf_headers)
-                    client.cookies.update(cookies)
+            # 复用 per-connector 的连接池客户端，避免每个请求重建 TCP/TLS 连接。
+            # cookies 按请求传递（而非 mutate 共享 client.cookies），避免跨请求串 CSRF 会话。
+            client = _http_client(self.config)
+            auth, auth_headers = await self._authentication(client, principal_token)
+            headers.update(auth_headers)
+            request_cookies = None
+            if is_write:
+                csrf_headers, request_cookies = await self._fetch_csrf_token(client, url, auth, headers)
+                headers.update(csrf_headers)
 
-                max_attempts = 1 + max(0, self.config.max_retries)
-                can_retry = not is_write or bool(idempotency_key)
-                response: httpx.Response | None = None
-                while attempts < max_attempts:
-                    attempts += 1
-                    request_kwargs: dict[str, Any] = {
-                        "method": method,
-                        "url": url,
-                        "params": query_params,
-                        "headers": headers,
-                        "auth": auth,
-                    }
-                    if operation == "batch" and payload.get("batch_format") == "multipart":
-                        content, content_type = self._multipart_batch(payload.get("requests") or [])
-                        request_kwargs["content"] = content
-                        request_kwargs["headers"] = {**headers, "Content-Type": content_type}
-                    else:
-                        request_kwargs["json"] = body
-                    response = await client.request(**request_kwargs)
-                    if response.status_code not in RETRYABLE_STATUS_CODES or not can_retry or attempts >= max_attempts:
-                        break
-                    await asyncio.sleep(self._retry_delay(response, attempts))
+            max_attempts = 1 + max(0, self.config.max_retries)
+            can_retry = not is_write or bool(idempotency_key)
+            response: httpx.Response | None = None
+            while attempts < max_attempts:
+                attempts += 1
+                request_kwargs: dict[str, Any] = {
+                    "method": method,
+                    "url": url,
+                    "params": query_params,
+                    "headers": headers,
+                    "auth": auth,
+                }
+                if request_cookies is not None:
+                    request_kwargs["cookies"] = request_cookies
+                if operation == "batch" and payload.get("batch_format") == "multipart":
+                    content, content_type = self._multipart_batch(payload.get("requests") or [])
+                    request_kwargs["content"] = content
+                    request_kwargs["headers"] = {**headers, "Content-Type": content_type}
+                else:
+                    request_kwargs["json"] = body
+                response = await client.request(**request_kwargs)
+                if response.status_code not in RETRYABLE_STATUS_CODES or not can_retry or attempts >= max_attempts:
+                    break
+                await asyncio.sleep(self._retry_delay(response, attempts))
 
             assert response is not None
             duration_ms = max(0, int((time.perf_counter() - started) * 1000))
             if response.status_code >= 400:
-                self._record_failure()
-                raise ERPConnectorUnavailableError(self._safe_http_error(response))
+                # 仅 5xx / 网络类失败视为连接器不可用并计入熔断；4xx 是业务/客户端错误
+                # （校验失败、404、409 冲突、412 ETag 不匹配等），不应刷开熔断拖垮正常流量。
+                if response.status_code >= 500:
+                    self._record_failure()
+                    raise ERPConnectorUnavailableError(self._safe_http_error(response))
+                # 4xx：作为业务错误抛出，但不触发熔断，也不误判为“成功”。
+                raise ERPConnectorError(self._safe_http_error(response))
             self._record_success()
             entity = {
                 "get_order": "sales_order",

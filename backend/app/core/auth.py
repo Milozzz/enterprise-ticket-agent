@@ -20,7 +20,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
-from app.core.config import get_settings
+from app.core.config import get_settings, testing_mode_active
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -68,9 +68,10 @@ async def get_current_user(
     返回 {"user_id": str, "role": str}，其中 user_id 是 DB users.id 的字符串形式（整数字符串）。
 
     TESTING 模式下返回 user_id="1"（对应 seed 数据中第一个用户），不校验 token。
+    生产环境即使误设 TESTING=1 也不会走此捷径（见 testing_mode_active）。
     """
     import os
-    if os.environ.get("TESTING") == "1":
+    if testing_mode_active():
         return {
             "user_id": "1",
             "role": "AGENT",
@@ -107,7 +108,7 @@ async def get_optional_user(
     用于向后兼容旧客户端（从 body 读 user_id 的场景）。
     """
     import os
-    if os.environ.get("TESTING") == "1":
+    if testing_mode_active():
         return {
             "user_id": "1",
             "role": "AGENT",

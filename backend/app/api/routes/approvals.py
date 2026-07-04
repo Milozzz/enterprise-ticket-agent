@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.agent.approval_service import authorize_generic_approval
+from app.core.auth import get_current_user
 from app.agent.approval_tasks import (
     complete_approval_task,
     escalate_overdue_tasks,
@@ -75,7 +76,13 @@ async def _write_approval_audit(
 
 
 @router.post("/approval")
-async def decide_generic_approval(payload: GenericApprovalRequest) -> dict:
+async def decide_generic_approval(
+    payload: GenericApprovalRequest,
+    jwt_user: Annotated[dict, Depends(get_current_user)],
+) -> dict:
+    # 审批人身份/角色以已验证 JWT 为准，忽略请求体里客户端可伪造的字段。
+    payload.reviewer_role = str(jwt_user.get("role") or "").upper()
+    payload.reviewer_id = str(jwt_user.get("user_id") or "")
     auth = authorize_generic_approval(
         scenario_id=payload.scenario_id,
         approval_type=payload.approval_type,
@@ -216,12 +223,14 @@ def _serialize_decision(decision: ApprovalDecision) -> dict[str, Any]:
 
 @router.get("/approval-center")
 async def list_approval_center(
+    jwt_user: Annotated[dict, Depends(get_current_user)],
     limit: int = 50,
     view: str = Query(default="approver", pattern="^(approver|requester|history)$"),
-    user_id: str = "",
-    user_role: str = "AGENT",
     status: str = "",
 ) -> dict[str, Any]:
+    # 身份以 JWT 为准，避免通过 query 参数任意冒充角色/用户列举审批任务。
+    user_id = str(jwt_user.get("user_id") or "")
+    user_role = str(jwt_user.get("role") or "AGENT")
     tenant_id = current_tenant_id()
     async with AsyncSessionLocal() as session:
         task_rows = (
@@ -272,6 +281,10 @@ async def list_approval_center(
 
 
 @router.post("/approval-center/escalate")
-async def sweep_approval_sla() -> dict[str, Any]:
+async def sweep_approval_sla(
+    jwt_user: Annotated[dict, Depends(get_current_user)],
+) -> dict[str, Any]:
+    if str(jwt_user.get("role") or "").upper() not in {"MANAGER", "SECURITY", "FINANCE"}:
+        raise HTTPException(status_code=403, detail="仅审批角色可触发 SLA 升级扫描")
     count = await escalate_overdue_tasks(tenant_id=current_tenant_id())
     return {"ok": True, "escalated": count}

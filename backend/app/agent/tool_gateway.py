@@ -505,6 +505,26 @@ def execute_tool(
             audit_event=audit_event,
         )
 
+    schema_error = _validate_tool_input(spec, args)
+    if schema_error:
+        duration_ms = _elapsed_ms(started)
+        audit_event = {
+            **audit_base,
+            "authorized": True,
+            "success": False,
+            "duration_ms": duration_ms,
+            "error": schema_error,
+        }
+        _log("warning", "tool_gateway_input_invalid", audit_event)
+        return ToolExecutionResult(
+            tool_name=tool_name,
+            success=False,
+            error=schema_error,
+            duration_ms=duration_ms,
+            idempotency_key=idempotency_key,
+            audit_event=audit_event,
+        )
+
     if context.dry_run:
         duration_ms = _elapsed_ms(started)
         audit_event = {
@@ -694,6 +714,9 @@ async def execute_tool_async(
             audit_base,
             f"Tool '{tool_name}' requires approval evidence before execution.",
         )
+    schema_error = _validate_tool_input(spec, args)
+    if schema_error:
+        return _blocked_result(tool_name, started, idempotency_key, audit_base, schema_error)
     if context.dry_run:
         duration_ms = _elapsed_ms(started)
         audit_event = {
@@ -967,6 +990,44 @@ def reset_circuit_breakers() -> None:
 
     with _CIRCUIT_LOCK:
         _CIRCUITS.clear()
+
+
+_JSON_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+}
+
+
+def _validate_tool_input(spec: ToolSpec, args: Mapping[str, Any]) -> str | None:
+    """按 spec.input_schema 强校验 LLM 提取的参数，防止脏参数进业务工具。
+
+    返回 None 表示通过，否则返回错误说明。仅做 required + 基础类型校验（不依赖外部
+    jsonschema 库），足以拦截 LLM 漏填/类型错误的常见问题。"""
+    schema = spec.input_schema or {}
+    if not schema:
+        return None
+    properties = schema.get("properties", {})
+    errors: list[str] = []
+    for required_field in schema.get("required", []):
+        if args.get(required_field) in (None, ""):
+            errors.append(f"缺少必填参数 '{required_field}'")
+    for field_name, value in args.items():
+        definition = properties.get(field_name)
+        if not definition or value is None:
+            continue
+        expected = _JSON_TYPE_MAP.get(definition.get("type"))
+        # bool 是 int 的子类，number/integer 校验时要排除 bool 误判
+        if expected and not isinstance(value, expected):
+            errors.append(f"参数 '{field_name}' 类型应为 {definition.get('type')}")
+        elif definition.get("type") in ("integer", "number") and isinstance(value, bool):
+            errors.append(f"参数 '{field_name}' 类型应为 {definition.get('type')}")
+    if errors:
+        return f"Tool '{spec.name}' 参数校验失败: " + "; ".join(errors)
+    return None
 
 
 def _build_idempotency_key(spec: ToolSpec, args: Mapping[str, Any]) -> str | None:

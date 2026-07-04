@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -196,7 +197,24 @@ class Settings(BaseSettings):
         return value
 
 
+def testing_mode_active() -> bool:
+    """是否处于测试快捷模式（跳过 JWT / admin key / 限流）。
+
+    安全护栏：生产环境下即使误设 TESTING=1 也强制视为关闭，避免一次误配
+    就关掉全部认证。仅在非生产环境允许 TESTING=1 生效。"""
+    if os.environ.get("TESTING") != "1":
+        return False
+    return get_settings().environment != "production"
+
+
+@lru_cache(maxsize=1)
+def _cached_settings() -> "Settings":
+    return Settings()
+
+
 def get_settings() -> Settings:
-    """每次调用重新读取环境变量与 .env（不使用 lru_cache）。
-    否则改 .env 后 uvicorn --reload 往往不会重启进程，聊天里仍拿到旧的 simulate_database_down 等配置。"""
+    """生产环境缓存 Settings（.env 不会变，避免热路径每次读盘解析）；
+    非生产不缓存，方便改 .env 后 uvicorn --reload 立即生效。"""
+    if os.environ.get("ENVIRONMENT", "development") == "production":
+        return _cached_settings()
     return Settings()

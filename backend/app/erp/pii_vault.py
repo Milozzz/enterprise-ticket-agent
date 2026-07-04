@@ -18,8 +18,10 @@ from app.core.field_encryption import (
 from app.db.models import PIIRecord
 
 
-def _record_id(tenant_id: str, subject_type: str, subject_id: str, field_name: str) -> str:
-    value = f"{tenant_id}:{subject_type}:{subject_id}:{field_name}"
+def _record_id(tenant_id: str, subject_type: str, subject_id: str, field_name: str, purpose: str) -> str:
+    # purpose 纳入主键：同一 (tenant,subject,field) 的不同用途各存一行，避免换 purpose 时
+    # merge 覆盖旧记录、且旧 purpose 读不到（静默丢数据）。与 AAD 的维度保持一致。
+    value = f"{tenant_id}:{subject_type}:{subject_id}:{field_name}:{purpose}"
     return f"PII-{hashlib.sha256(value.encode()).hexdigest()[:28].upper()}"
 
 
@@ -57,7 +59,7 @@ async def put_pii(
     aad = _aad(tenant_id, subject_type, subject_id, field_name, purpose)
     encrypted = _cipher().encrypt(value.encode(), aad=aad)
     record = PIIRecord(
-        pii_record_id=_record_id(tenant_id, subject_type, subject_id, field_name),
+        pii_record_id=_record_id(tenant_id, subject_type, subject_id, field_name, purpose),
         tenant_id=tenant_id,
         subject_type=subject_type,
         subject_id=subject_id,
@@ -88,6 +90,7 @@ async def get_pii(
             PIIRecord.subject_type == subject_type,
             PIIRecord.subject_id == subject_id,
             PIIRecord.field_name == field_name,
+            PIIRecord.purpose == purpose,
             PIIRecord.deleted_at.is_(None),
         )
     )

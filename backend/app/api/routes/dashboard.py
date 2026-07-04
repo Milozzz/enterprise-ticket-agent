@@ -7,15 +7,17 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
+from app.core.auth import get_current_user
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
 from app.db.models import AuditLog, LLMUsageRecord, Order, RefundLog, Ticket, TicketStatus
 from app.erp.metrics import get_erp_business_metrics
 
 logger = get_logger(__name__)
-router = APIRouter()
+# 运营数据（成本、失败链路、业务量）必须登录后才能访问。
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 # 人工审批超时阈值（超过此时长仍处于 PENDING 视为超时）
 APPROVAL_TIMEOUT_HOURS = 24

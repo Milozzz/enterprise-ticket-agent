@@ -117,17 +117,29 @@ export default function ChatPage() {
     return () => { cancelled = true; };
   }, []);
 
-  // ── 提交（每次生成新 thread_id） ──────────────────────────────
+  // ── 提交（同一会话复用 thread_id，支持多轮追问；仅每轮换 trace_id）────────────
   const submitWithFreshThread = useCallback((e: React.FormEvent) => {
-    const freshId = `thread_${Date.now()}`;
+    // 首条消息才新建 thread；后续消息复用当前 thread，保证多轮上下文延续。
+    const threadId = activeThreadId ?? `thread_${Date.now()}`;
     const freshTraceId = `trace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    nextThreadIdRef.current = freshId;
+    nextThreadIdRef.current = threadId;
     nextTraceIdRef.current = freshTraceId;
+    if (activeThreadId !== threadId) {
+      setActiveThreadId(threadId);
+      lastAuditSignatureRef.current = "";
+      setAuditLogs([]);
+    }
+    handleSubmit(e, { body: { user_id: currentUserId, user_role: currentRole, thread_id: threadId, trace_id: freshTraceId } });
+  }, [handleSubmit, currentUserId, currentRole, activeThreadId]);
+
+  // ── 显式新建会话：重置 thread，开启全新上下文 ──────────────────────────────
+  const startNewSession = useCallback(() => {
+    const freshId = `thread_${Date.now()}`;
+    nextThreadIdRef.current = freshId;
     setActiveThreadId(freshId);
     lastAuditSignatureRef.current = "";
     setAuditLogs([]);
-    handleSubmit(e, { body: { user_id: currentUserId, user_role: currentRole, thread_id: freshId, trace_id: freshTraceId } });
-  }, [handleSubmit, currentUserId, currentRole]);
+  }, []);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -278,6 +290,16 @@ export default function ChatPage() {
                   <Badge variant="outline" className="text-[10px] font-mono bg-background border-none shadow-sm px-2">
                     ID: {currentUserId}
                   </Badge>
+                  {activeThreadId && (
+                    <button
+                      type="button"
+                      onClick={startNewSession}
+                      className="text-[10px] font-medium text-muted-foreground hover:text-foreground underline underline-offset-2"
+                      title="开启一个全新会话（清空多轮上下文）"
+                    >
+                      新对话
+                    </button>
+                  )}
                   {activeThreadId && (
                     <Badge
                       variant="outline"

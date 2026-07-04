@@ -2043,11 +2043,12 @@ class UserMemory(Base):
     """
     __tablename__ = "user_memory"
     __table_args__ = (
-        UniqueConstraint("user_id", name="uq_user_memory_user_id"),
-        Index("ix_user_memory_user_id", "user_id", unique=True),
+        UniqueConstraint("tenant_id", "user_id", name="uq_user_memory_tenant_user"),
+        Index("ix_user_memory_tenant_user", "tenant_id", "user_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     # 累计退款次数（已完成）
     refund_count: Mapped[int] = mapped_column(Integer, default=0)

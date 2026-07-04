@@ -44,26 +44,35 @@ def _set_postgres_tenant_context(session, transaction, connection) -> None:
 
 
 async def init_db() -> None:
-    """初始化数据库，创建所有表（开发环境使用，生产环境用 Alembic）"""
+    """初始化数据库，创建所有表（开发环境使用，生产环境用 Alembic）。
+
+    注意：create_all 只建表，不创建 RLS 策略（那写在 alembic 迁移里）。因此用
+    create_all 起的库租户隔离是关闭的——不要用它跑多租户隔离测试，否则会得到
+    “看起来隔离了”的假信心。需要验证隔离时请改用 `alembic upgrade head`。"""
     async with engine.begin() as conn:
         # 启用 pgvector 扩展（仅 PostgreSQL）
         if "postgresql" in settings.database_url:
             await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
+            import warnings
+            warnings.warn(
+                "init_db(create_all) does not create RLS policies; run alembic migrations "
+                "for tenant isolation before relying on it.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         await conn.run_sync(Base.metadata.create_all)
 
 
 async def get_db():
-    """FastAPI 依赖注入：获取数据库会话"""
-    try:
-        async with AsyncSessionLocal() as session:
-            try:
-                await apply_tenant_context(session, settings.default_tenant_id)
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-            finally:
-                await session.close()
-    except Exception:
-        yield None
+    """FastAPI 依赖注入：获取数据库会话。
+
+    绑定当前请求租户（而非写死默认租户），保证 RLS 生效；连接失败直接抛出，
+    由 FastAPI 返回 5xx，而不是 yield None 让下游对 None 调用 .execute 崩在更深处。"""
+    async with AsyncSessionLocal() as session:
+        try:
+            await apply_tenant_context(session, current_tenant_id())
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise

@@ -25,7 +25,7 @@ from app.erp.refund_saga import RefundFinanceCommand, execute_refund_finance_sag
 logger = get_logger(__name__)
 
 
-async def _update_user_memory_refund(user_id: str) -> None:
+async def _update_user_memory_refund(user_id: str, tenant_id: str = "default") -> None:
     try:
         uid = int(user_id)
     except (TypeError, ValueError):
@@ -33,10 +33,16 @@ async def _update_user_memory_refund(user_id: str) -> None:
 
     try:
         async with resolve_session_factory(AsyncSessionLocal)() as session:
-            memory = await session.scalar(select(UserMemory).where(UserMemory.user_id == uid))
+            memory = await session.scalar(
+                select(UserMemory).where(
+                    UserMemory.user_id == uid,
+                    UserMemory.tenant_id == tenant_id,
+                )
+            )
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             if memory is None:
                 memory = UserMemory(
+                    tenant_id=tenant_id,
                     user_id=uid,
                     refund_count=1,
                     rejected_count=0,
@@ -122,7 +128,7 @@ async def execute_refund_node(state: AgentState) -> dict:
     )
     refund_request_id = str(
         get_state_val(state, "refund_request_id")
-        or deterministic_refund_id(order_id, ticket_id, float(amount))
+        or deterministic_refund_id(order_id, ticket_id, amount)
     )
 
     logger.info(
@@ -199,7 +205,10 @@ async def execute_refund_node(state: AgentState) -> dict:
                 )
         except Exception as exc:
             logger.warning("legacy_ticket_projection_failed", error=str(exc), ticket_id=ticket_id)
-        await _update_user_memory_refund(str(get_state_val(state, "user_id", "unknown")))
+        await _update_user_memory_refund(
+            str(get_state_val(state, "user_id", "unknown")),
+            str(get_state_val(state, "tenant_id", "default") or "default"),
+        )
 
     result = {
         "ticket_id": ticket_id,

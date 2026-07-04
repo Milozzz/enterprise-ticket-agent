@@ -21,14 +21,15 @@ from collections.abc import Mapping
 from langgraph.types import interrupt
 from app.agent.approval_tasks import complete_approval_task, ensure_approval_task
 from app.agent.dependencies import resolve_session_factory
+from app.services.approval_resume import resolve_operator_id
 from app.agent.scenario_registry import get_default_registry
 from app.agent.long_term_memory import upsert_long_term_memory
 
 logger = get_logger(__name__)
 
 
-async def _update_user_memory_rejected(user_id: str) -> None:
-    """审批拒绝后，更新用户跨会话记忆（rejected_count）"""
+async def _update_user_memory_rejected(user_id: str, tenant_id: str = "default") -> None:
+    """审批拒绝后，更新用户跨会话记忆（rejected_count，按租户隔离）"""
     try:
         uid = int(user_id)
     except (TypeError, ValueError):
@@ -36,12 +37,16 @@ async def _update_user_memory_rejected(user_id: str) -> None:
     try:
         async with resolve_session_factory(AsyncSessionLocal)() as session:
             result = await session.execute(
-                select(UserMemory).where(UserMemory.user_id == uid)
+                select(UserMemory).where(
+                    UserMemory.user_id == uid,
+                    UserMemory.tenant_id == tenant_id,
+                )
             )
             mem = result.scalar_one_or_none()
             now = datetime.utcnow()
             if mem is None:
                 mem = UserMemory(
+                    tenant_id=tenant_id,
                     user_id=uid,
                     refund_count=0,
                     rejected_count=1,
@@ -169,9 +174,11 @@ async def human_review_node(state: AgentState) -> dict:
         try:
             ticket_int_id = int(ticket_id)
             new_status = TicketStatus.APPROVED if decision == "approve" else TicketStatus.REJECTED
-            op_id = 2  # 默认用 MANAGER 用户（id=2）作为审批人
 
             async with resolve_session_factory(AsyncSessionLocal)() as session:
+                # 解析真实审批人（按 name / email），解析不到则留空而非记成假的固定用户，
+                # 保证工单 operator_id 可用于事后审计追溯“谁批的”。
+                op_id = await resolve_operator_id(str(reviewer_id) if reviewer_id else None, session)
                 stmt = update(Ticket).where(Ticket.id == ticket_int_id).values(
                     status=new_status, operator_id=op_id
                 )
@@ -208,7 +215,10 @@ async def human_review_node(state: AgentState) -> dict:
         logger.info("human_rejected", reviewer_id=get_state_val(state, "reviewer_id"))
         # 更新用户跨会话记忆（拒绝计数，自动触发欺诈标记）
         user_id = get_state_val(state, "user_id", "unknown")
-        await _update_user_memory_rejected(user_id)
+        await _update_user_memory_rejected(
+            user_id,
+            str(get_state_val(state, "tenant_id", "default") or "default"),
+        )
         try:
             await upsert_long_term_memory(
                 user_id=str(user_id),

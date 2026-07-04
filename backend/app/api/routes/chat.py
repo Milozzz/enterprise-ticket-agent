@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.graph import ticket_graph
-from app.core.auth import get_optional_user
+from app.core.auth import get_current_user, get_optional_user
 from app.core.config import effective_simulate_database_down, get_settings
 from app.core.logging import get_logger
 from app.core.observability import get_langfuse_callback
@@ -128,12 +128,21 @@ async def chat_with_agent(
 
 
 @router.post("/resume")
-async def resume_agent(request: ResumeRequest):
-    if request.reviewer_role.upper() not in {"MANAGER", "SECURITY", "FINANCE"}:
+async def resume_agent(
+    request: ResumeRequest,
+    jwt_user: Annotated[dict, Depends(get_current_user)],
+):
+    # 审批人身份/角色一律以已验证的 JWT 为准，忽略请求体里客户端可伪造的角色字段。
+    reviewer_role = str(jwt_user.get("role") or "").upper()
+    reviewer_id = str(jwt_user.get("user_id") or "")
+    if reviewer_role not in {"MANAGER", "SECURITY", "FINANCE"}:
         raise HTTPException(
             status_code=403,
-            detail=f"权限不足：角色 '{request.reviewer_role}' 无法执行审批操作",
+            detail=f"权限不足：角色 '{reviewer_role}' 无法执行审批操作",
         )
+    # 用可信身份覆盖请求体，后续所有下游都用这份。
+    request.reviewer_role = reviewer_role
+    request.reviewer_id = reviewer_id
 
     callback = get_langfuse_callback(
         thread_id=request.thread_id,

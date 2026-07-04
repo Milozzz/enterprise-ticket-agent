@@ -160,6 +160,13 @@ async def lifespan(app: FastAPI):
     if graph_resource is not None:
         await graph_resource.__aexit__(None, None, None)
 
+    # 关闭 ERP 连接器的连接池客户端
+    try:
+        from app.erp.runtime import close_erp_http_clients
+        await close_erp_http_clients()
+    except Exception:
+        pass
+
     # 关闭前刷新 Langfuse 缓冲区，确保所有 trace 都发送出去
     flush_langfuse()
     logger.info("Shutting down")
@@ -184,14 +191,9 @@ _cors_kw: dict = {
 if settings.environment == "development":
     _cors_kw["allow_origin_regex"] = r"http://(localhost|127\.0\.0\.1)(:\d+)?"
 else:
+    # 生产环境只信任显式配置的前端来源；不允许 localhost 携带凭证跨域。
     frontend_origin = settings.frontend_origin.rstrip("/")
-    _cors_kw["allow_origins"] = [
-        origin for origin in [
-            frontend_origin,
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ] if origin
-    ]
+    _cors_kw["allow_origins"] = [frontend_origin] if frontend_origin else []
 app.add_middleware(CORSMiddleware, **_cors_kw)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(TenantContextMiddleware)
@@ -211,19 +213,20 @@ app.include_router(mcp_server.router, tags=["MCP"])
 app.include_router(a2a_server.router, tags=["A2A"])
 
 
-# ── 认证路由（签发 JWT，供开发/测试使用）────────────────────────────────────────
-@app.post("/auth/token", tags=["Auth"])
-async def issue_token(
-    user_id: str = Body(...),
-    role: str = Body(default="USER"),
-    tenant_id: str = Body(default=settings.default_tenant_id),
-):
-    """
-    开发用：凭 user_id + role 签发 JWT。
-    生产环境应替换为真实 SSO / OAuth2 流程。
-    """
-    token = create_access_token(user_id=user_id, role=role, tenant_id=tenant_id)
-    return {"access_token": token, "token_type": "bearer"}
+# ── 认证路由（签发 JWT，仅开发/测试可用）──────────────────────────────────────
+# 该端点凭 user_id + role 无凭据签发 JWT，绝不能暴露在生产：否则任何人可自签
+# MANAGER token。生产环境必须接入真实 SSO / OAuth2，因此此处仅在非生产注册。
+if settings.environment != "production":
+
+    @app.post("/auth/token", tags=["Auth"])
+    async def issue_token(
+        user_id: str = Body(...),
+        role: str = Body(default="USER"),
+        tenant_id: str = Body(default=settings.default_tenant_id),
+    ):
+        """开发/测试专用：凭 user_id + role 签发 JWT。生产环境不注册此路由。"""
+        token = create_access_token(user_id=user_id, role=role, tenant_id=tenant_id)
+        return {"access_token": token, "token_type": "bearer"}
 
 
 @app.get("/health")

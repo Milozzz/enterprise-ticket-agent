@@ -83,9 +83,9 @@ async def _upsert_ticket(order_id: str, user_role: str, thread_id: str, reason: 
         return ticket.id
 
 
-async def _load_user_memory(user_id: str) -> dict:
+async def _load_user_memory(user_id: str, tenant_id: str) -> dict:
     """
-    读取 user_memory 表中的持久化用户画像。
+    读取 user_memory 表中的持久化用户画像（按租户隔离）。
     找不到记录时返回空默认值（不阻断主流程）。
     """
     try:
@@ -96,7 +96,10 @@ async def _load_user_memory(user_id: str) -> dict:
     try:
         async with resolve_session_factory(AsyncSessionLocal)() as session:
             result = await session.execute(
-                select(UserMemory).where(UserMemory.user_id == uid)
+                select(UserMemory).where(
+                    UserMemory.user_id == uid,
+                    UserMemory.tenant_id == tenant_id,
+                )
             )
             mem = result.scalar_one_or_none()
             if mem is None:
@@ -157,9 +160,10 @@ async def check_risk_node(state: AgentState) -> dict:
             raise RuntimeError(gateway_result.error or "check_risk_level failed")
         risk_data = gateway_result.data
 
-        # 读取跨会话用户记忆，补充风控评分
+        # 读取跨会话用户记忆，补充风控评分（按租户隔离）
         user_id = get_state_val(state, "user_id", "unknown")
-        user_mem = await _load_user_memory(user_id)
+        tenant_id = str(get_state_val(state, "tenant_id", "default") or "default")
+        user_mem = await _load_user_memory(user_id, tenant_id)
         if user_mem:
             if user_mem.get("fraud_flag"):
                 # 欺诈标记：强制人工，风险分拉满
