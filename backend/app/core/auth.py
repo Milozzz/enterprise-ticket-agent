@@ -20,18 +20,23 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
-from app.core.config import get_settings
+from app.core.config import get_settings, testing_mode_active
 
 _bearer = HTTPBearer(auto_error=False)
 
 
-def create_access_token(user_id: str | int, role: str = "USER") -> str:
+def create_access_token(
+    user_id: str | int,
+    role: str = "USER",
+    tenant_id: str | None = None,
+) -> str:
     """生成 JWT access token（供 /auth/login 等接口签发）"""
     settings = get_settings()
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "role": role.upper(),
+        "tenant_id": tenant_id or settings.default_tenant_id,
         "iat": now,
         "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
@@ -63,10 +68,15 @@ async def get_current_user(
     返回 {"user_id": str, "role": str}，其中 user_id 是 DB users.id 的字符串形式（整数字符串）。
 
     TESTING 模式下返回 user_id="1"（对应 seed 数据中第一个用户），不校验 token。
+    生产环境即使误设 TESTING=1 也不会走此捷径（见 testing_mode_active）。
     """
     import os
-    if os.environ.get("TESTING") == "1":
-        return {"user_id": "1", "role": "AGENT"}
+    if testing_mode_active():
+        return {
+            "user_id": "1",
+            "role": "AGENT",
+            "tenant_id": os.environ.get("TEST_TENANT_ID", get_settings().default_tenant_id),
+        }
 
     if credentials is None:
         raise HTTPException(
@@ -83,7 +93,11 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token payload 缺少 sub 字段",
         )
-    return {"user_id": user_id, "role": role}
+    return {
+        "user_id": user_id,
+        "role": role,
+        "tenant_id": payload.get("tenant_id") or get_settings().default_tenant_id,
+    }
 
 
 async def get_optional_user(
@@ -94,13 +108,21 @@ async def get_optional_user(
     用于向后兼容旧客户端（从 body 读 user_id 的场景）。
     """
     import os
-    if os.environ.get("TESTING") == "1":
-        return {"user_id": "1", "role": "AGENT"}
+    if testing_mode_active():
+        return {
+            "user_id": "1",
+            "role": "AGENT",
+            "tenant_id": os.environ.get("TEST_TENANT_ID", get_settings().default_tenant_id),
+        }
 
     if credentials is None:
         return None
     try:
         payload = _decode_token(credentials.credentials)
-        return {"user_id": payload.get("sub", ""), "role": payload.get("role", "USER")}
+        return {
+            "user_id": payload.get("sub", ""),
+            "role": payload.get("role", "USER"),
+            "tenant_id": payload.get("tenant_id") or get_settings().default_tenant_id,
+        }
     except HTTPException:
         return None

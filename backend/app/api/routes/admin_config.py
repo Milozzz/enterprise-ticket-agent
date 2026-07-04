@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import json
+import hmac
+import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.agent.generic_runtime import run_configured_scenario
+from app.agent.knowledge_base import (
+    knowledge_base_report,
+    rebuild_policy_index,
+    test_policy_retrieval,
+)
 from app.agent.mcp_adapter import list_mcp_compatible_tools
 from app.agent.saga import refund_saga_template
-from app.agent.scenario_eval import list_scenario_eval_catalog, run_scenario_eval
+from app.agent.scenario_eval import (
+    list_scenario_eval_catalog,
+    run_all_scenario_evals,
+    run_scenario_eval,
+)
+from app.agent.enterprise_readiness import run_enterprise_readiness_eval
+from app.agent.p0_evaluation import run_p0_eval_report
 from app.agent.scenario_registry import (
     DEFAULT_SCENARIO_DIR,
     ScenarioConfig,
@@ -28,15 +41,28 @@ from app.agent.scenario_validation import (
 from app.agent.scenario_templates import instantiate_template, list_scenario_templates
 from app.agent.scenario_versions import (
     create_scenario_version,
+    diff_scenario_version,
     list_scenario_versions,
     publish_scenario,
     rollback_scenario,
 )
-from app.agent.tool_gateway import list_tool_specs
+from app.agent.tool_gateway import list_tool_specs, tool_registry_report
 from app.agent.workflow_factory import WORKFLOW_ENTRYPOINTS
 from app.core.policy import get_policy_version, load_policy
+from app.core.config import get_settings
 
 router = APIRouter()
+
+
+def require_admin_api_key(
+    admin_api_key: Annotated[str | None, Header(alias="X-Admin-API-Key")] = None,
+) -> None:
+    from app.core.config import testing_mode_active
+    if testing_mode_active():
+        return
+    configured = get_settings().admin_api_key
+    if configured and (not admin_api_key or not hmac.compare_digest(configured, admin_api_key)):
+        raise HTTPException(status_code=403, detail="Admin API key is required.")
 
 
 class HITLConfigPayload(BaseModel):
@@ -85,9 +111,10 @@ class ScenarioConfigPayload(BaseModel):
     @field_validator("workflow")
     @classmethod
     def workflow_must_exist(cls, value: str) -> str:
-        if value not in WORKFLOW_ENTRYPOINTS:
-            raise ValueError(f"Unknown workflow: {value}")
-        return value
+        normalized = value.strip()
+        if not normalized or not normalized.replace("_", "a").isalnum():
+            raise ValueError("Workflow must be a non-empty alphanumeric identifier")
+        return normalized
 
 
 class RouteSimulationPayload(BaseModel):
@@ -99,6 +126,16 @@ class RuntimeSimulationPayload(BaseModel):
     user_id: str = Field(default="admin-simulator", max_length=80)
     user_role: str = Field(default="USER", max_length=40)
     dry_run: bool = True
+
+
+class PolicySearchPayload(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=3, ge=1, le=10, alias="topK")
+    user_role: str = Field(default="USER", max_length=40, alias="userRole")
+
+
+class PolicyIndexPayload(BaseModel):
+    force: bool = False
 
 
 class VersionActionPayload(BaseModel):
@@ -258,6 +295,8 @@ async def publish_scenario_route(scenario_id: str, payload: VersionActionPayload
         version = publish_scenario(scenario_id, author=payload.author, note=payload.note)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown scenario '{scenario_id}'.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"version": version.to_dict(), "scenario": get_default_registry().get(scenario_id).to_dict()}
 
 
@@ -270,9 +309,34 @@ async def rollback_scenario_route(scenario_id: str, payload: RollbackPayload) ->
     return {"version": version.to_dict(), "scenario": get_default_registry().get(scenario_id).to_dict()}
 
 
+@router.get("/scenarios/{scenario_id}/versions/{version_id}/diff")
+async def get_scenario_version_diff(scenario_id: str, version_id: str) -> dict[str, Any]:
+    try:
+        return {"diff": diff_scenario_version(scenario_id, version_id)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown scenario version '{version_id}'.") from exc
+
+
 @router.get("/scenarios/evals/catalog")
 async def get_scenario_eval_catalog() -> dict[str, Any]:
     return {"eval_catalog": list_scenario_eval_catalog()}
+
+
+@router.get("/evals/report")
+async def get_all_scenario_eval_report() -> dict[str, Any]:
+    return {"eval_report": await run_all_scenario_evals()}
+
+
+@router.get("/evals/p0-report")
+async def get_p0_eval_report() -> dict[str, Any]:
+    return {"eval_report": await run_p0_eval_report(use_llm_judge=False)}
+
+
+@router.get("/evals/enterprise-readiness")
+async def get_enterprise_readiness_report(
+    connector_id: str = "CONN-SAP-ODATA-DEMO",
+) -> dict[str, Any]:
+    return {"readiness": await run_enterprise_readiness_eval(connector_id)}
 
 
 @router.post("/scenarios/{scenario_id}/eval")
@@ -280,9 +344,41 @@ async def run_scenario_eval_route(scenario_id: str) -> dict[str, Any]:
     return {"eval": await run_scenario_eval(scenario_id)}
 
 
+@router.get("/tools/registry")
+async def get_tool_registry_report() -> dict[str, Any]:
+    return tool_registry_report()
+
+
 @router.get("/tools/mcp")
 async def get_mcp_tool_descriptors() -> dict[str, Any]:
     return {"tools": list_mcp_compatible_tools()}
+
+
+@router.get("/knowledge/policies")
+async def get_policy_knowledge_base() -> dict[str, Any]:
+    return await knowledge_base_report()
+
+
+@router.post("/knowledge/policies/search")
+async def search_policy_knowledge_base(payload: PolicySearchPayload) -> dict[str, Any]:
+    return {
+        "result": await test_policy_retrieval(
+            payload.query,
+            top_k=payload.top_k,
+            user_role=payload.user_role,
+        )
+    }
+
+
+@router.post("/knowledge/policies/reindex")
+async def reindex_policy_knowledge_base(
+    payload: PolicyIndexPayload,
+    _: Annotated[None, Depends(require_admin_api_key)],
+) -> dict[str, Any]:
+    try:
+        return {"index": await rebuild_policy_index(force=payload.force)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/saga/templates/refund")

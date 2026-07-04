@@ -4,6 +4,7 @@ Ticket 数据访问层
 """
 
 import hashlib
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import update, select
 from sqlalchemy.exc import IntegrityError
@@ -20,12 +21,20 @@ def ticket_idempotency_key(order_id: str, thread_id: str, reason: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def refund_idempotency_key(order_id: str, ticket_id: str, amount: float) -> str:
-    raw = f"refund:{order_id}:{ticket_id}:{amount:.2f}"
+def _canonical_amount(amount: float | str | Decimal) -> str:
+    """把金额规范化为固定两位小数字符串，保证 100 / "100.00" / 100.0 生成同一幂等键。"""
+    try:
+        return format(Decimal(str(amount)).quantize(Decimal("0.01")), "f")
+    except (InvalidOperation, ValueError):
+        return "0.00"
+
+
+def refund_idempotency_key(order_id: str, ticket_id: str, amount: float | str | Decimal) -> str:
+    raw = f"refund:{order_id}:{ticket_id}:{_canonical_amount(amount)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def deterministic_refund_id(order_id: str, ticket_id: str, amount: float) -> str:
+def deterministic_refund_id(order_id: str, ticket_id: str, amount: float | str | Decimal) -> str:
     return f"REFUND_{refund_idempotency_key(order_id, ticket_id, amount)[:12].upper()}"
 
 

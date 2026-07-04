@@ -9,6 +9,7 @@ move permission and reimbursement flows away from scenario-specific node code.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 
 from app.agent.scenario_registry import ScenarioConfig, get_default_registry
@@ -78,28 +79,59 @@ async def run_configured_scenario(
         "scenario": scenario.to_dict(),
     }
 
-    policy_decision = evaluate_runtime_policy(runtime.get("policy", {}), base_context)
-    tool_result = execute_runtime_tool(
-        state=state,
-        scenario=scenario,
-        runtime=runtime,
-        context=base_context,
-        dry_run=dry_run,
-    )
-    if not tool_result.success:
+    policy_configs = list(runtime.get("policies") or [runtime.get("policy", {})])
+    policy_decisions = [
+        evaluate_runtime_policy(config, base_context)
+        for config in policy_configs
+        if config
+    ]
+    policy_decision = combine_policy_decisions(policy_decisions)
+    if not policy_decision.allowed:
         return {
             "intent": scenario.id,
             "scenario_id": scenario.id,
-            "error_message": tool_result.error or f"{scenario.name} tool execution failed.",
-            "tool_gateway_events": [tool_result.audit_event],
-            "current_step": f"{scenario.id}_error",
+            "error_message": policy_decision.reason or f"{scenario.name} was denied by policy.",
+            "policy_events": [decision.to_audit_event() for decision in policy_decisions],
+            "current_step": f"{scenario.id}_policy_denied",
         }
 
-    request_data = dict(tool_result.data or {})
+    tool_configs = list(runtime.get("tools") or [runtime.get("tool", {})])
+    tool_results = []
+    for tool_config in (config for config in tool_configs if config):
+        execution_context = {
+            **base_context,
+            "tool_results": [dict(item.data or {}) for item in tool_results],
+        }
+        tool_result = execute_runtime_tool(
+            state=state,
+            scenario=scenario,
+            runtime=runtime,
+            tool_config=tool_config,
+            context=execution_context,
+            dry_run=dry_run,
+        )
+        tool_results.append(tool_result)
+        if not tool_result.success:
+            return {
+                "intent": scenario.id,
+                "scenario_id": scenario.id,
+                "error_message": tool_result.error or f"{scenario.name} tool execution failed.",
+                "tool_gateway_events": [item.audit_event for item in tool_results],
+                "policy_events": [decision.to_audit_event() for decision in policy_decisions],
+                "current_step": f"{scenario.id}_error",
+            }
+
+    if not tool_results:
+        raise ValueError(f"Scenario '{scenario.id}' does not define runtime tools.")
+    request_data = dict(tool_results[0].data or {})
+    request_data["toolResults"] = [dict(item.data or {}) for item in tool_results]
     request_data["requestId"] = request_data.get("requestId") or f"DRY_RUN_{scenario.id.upper()}"
     request_data["approvalRequired"] = policy_decision.requires_human_review
     request_data["policyDecision"] = policy_decision.to_audit_event()
     request_data["status"] = "pending_review" if policy_decision.requires_human_review else "auto_approved"
+    request_data.setdefault("currency", "CNY")
+    if scenario.id == "reimbursement":
+        request_data.setdefault("costCenterId", "CC-SUPPORT")
 
     full_context = {
         **base_context,
@@ -123,8 +155,8 @@ async def run_configured_scenario(
         "business_request": request_data,
         "approval_required": policy_decision.requires_human_review,
         "approval_type": str(runtime.get("approval_type") or scenario.id),
-        "policy_events": [policy_decision.to_audit_event()],
-        "tool_gateway_events": [tool_result.audit_event],
+        "policy_events": [decision.to_audit_event() for decision in policy_decisions],
+        "tool_gateway_events": [item.audit_event for item in tool_results],
         "dry_run": dry_run,
         "reply_text": reply_text,
         "current_step": str(runtime.get("current_step") or f"{scenario.id}_done"),
@@ -167,7 +199,11 @@ def extract_field(message: str, field_config: Mapping[str, Any]) -> Any:
     if strategy == "amount":
         regex = str(field_config.get("regex") or r"(?:¥|￥)?\s*(\d+(?:\.\d+)?)\s*(?:元|块|rmb|cny)?")
         match = re.search(regex, text, re.IGNORECASE)
-        return float(match.group(1)) if match else float(field_config.get("default", 0))
+        raw = match.group(1) if match else field_config.get("default", 0)
+        try:
+            return Decimal(str(raw)).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            return Decimal("0.00")
 
     if strategy == "message_excerpt":
         max_length = int(field_config.get("max_length") or 500)
@@ -182,7 +218,29 @@ def evaluate_runtime_policy(config: Mapping[str, Any], context: Mapping[str, Any
     if handler is None:
         raise ValueError(f"Unknown runtime policy '{policy_name}'.")
     args = {key: resolve_value(value, context) for key, value in dict(config.get("args") or {}).items()}
+    args.setdefault("routing_key", str(resolve_path("context.thread_id", context) or "global"))
     return handler(**args)
+
+
+def combine_policy_decisions(decisions: list[PolicyDecision]) -> PolicyDecision:
+    if not decisions:
+        raise ValueError("Configured scenario must define at least one policy binding.")
+    if len(decisions) == 1:
+        return decisions[0]
+    allowed = all(decision.allowed for decision in decisions)
+    review = any(decision.requires_human_review for decision in decisions)
+    return PolicyDecision(
+        policy_version="+".join(dict.fromkeys(decision.policy_version for decision in decisions)),
+        effect="DENY" if not allowed else "REVIEW" if review else "ALLOW",
+        allowed=allowed,
+        requires_human_review=review,
+        matched_rules=tuple(
+            rule for decision in decisions for rule in decision.matched_rules
+        ),
+        reason="; ".join(decision.reason for decision in decisions if decision.reason),
+        policy_variant="+".join(dict.fromkeys(decision.policy_variant for decision in decisions)),
+        rollout_bucket=decisions[0].rollout_bucket,
+    )
 
 
 def execute_runtime_tool(
@@ -190,10 +248,11 @@ def execute_runtime_tool(
     state: AgentState,
     scenario: ScenarioConfig,
     runtime: Mapping[str, Any],
+    tool_config: Mapping[str, Any] | None = None,
     context: Mapping[str, Any],
     dry_run: bool = False,
 ):
-    tool_config = dict(runtime.get("tool") or {})
+    tool_config = dict(tool_config or runtime.get("tool") or {})
     tool_name = str(tool_config.get("name") or "")
     handler = TOOL_HANDLERS.get(tool_name)
     if handler is None:

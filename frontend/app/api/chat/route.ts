@@ -207,7 +207,7 @@ export async function POST(req: NextRequest) {
  */
 export async function PUT(req: NextRequest) {
   try {
-    const { threadId, action, reviewerId, reviewerRole } = await req.json();
+    const { threadId, action, reviewerId, reviewerRole, comment } = await req.json();
 
     const lf = getLangfuse();
     const trace = lf?.trace({
@@ -226,6 +226,7 @@ export async function PUT(req: NextRequest) {
         action,
         reviewer_id: reviewerId,
         reviewer_role: reviewerRole ?? "AGENT",
+        comment: comment ?? "",
       }),
     });
 

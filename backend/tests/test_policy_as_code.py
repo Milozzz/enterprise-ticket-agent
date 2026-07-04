@@ -10,7 +10,7 @@ from app.core.permissions import check_permission, require_permission, Permissio
 def test_policy_file_loads_with_version_and_actions():
     policy = load_policy()
 
-    assert get_policy_version() == "2026-05-20.v1"
+    assert get_policy_version() == "2026-06-27.v2"
     assert "execute_refund" in policy["actions"]
     assert policy["actions"]["execute_refund"]["allowed_roles"] == ["AGENT", "MANAGER"]
 
@@ -20,7 +20,7 @@ def test_action_policy_allows_manager_approval():
 
     assert decision.allowed is True
     assert decision.effect == "allow"
-    assert decision.policy_version == "2026-05-20.v1"
+    assert decision.policy_version == "2026-06-27.v2"
     assert decision.matched_rules == ("actions.approve_refund.allowed_roles",)
 
 
@@ -53,10 +53,11 @@ def test_permissions_facade_uses_policy_as_code():
         raise AssertionError("require_permission should deny USER execute_refund")
 
 
-def test_unknown_action_keeps_default_allow_policy():
+def test_unknown_action_is_denied_by_default():
     decision = evaluate_action_policy("USER", "some_undefined_action")
 
-    assert decision.allowed is True
+    assert decision.allowed is False
+    assert decision.effect == "deny"
     assert decision.matched_rules == ("default_action_effect",)
 
 

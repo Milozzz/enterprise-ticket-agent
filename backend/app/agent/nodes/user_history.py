@@ -9,6 +9,8 @@ from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
+from app.agent.dependencies import resolve_session_factory
+from app.agent.long_term_memory import list_active_memories
 from app.db.models import Ticket, TicketStatus, Order
 from sqlalchemy import select, func
 
@@ -23,12 +25,10 @@ async def fetch_user_history_node(state: AgentState) -> dict:
     结果合并到 make_risk_decision_node 做最终风控判断。
     """
     user_id = get_state_val(state, "user_id", "unknown")
-    order_id = get_state_val(state, "order_id", "")
-
     logger.info("node_start", node="fetch_user_history", user_id=user_id)
 
     try:
-        async with AsyncSessionLocal() as session:
+        async with resolve_session_factory(AsyncSessionLocal)() as session:
             # 查询该用户历史工单数量
             result = await session.execute(
                 select(func.count(Ticket.id)).join(Order, Ticket.order_id == Order.id)
@@ -65,6 +65,20 @@ async def fetch_user_history_node(state: AgentState) -> dict:
             # 高风险：拒绝次数 >= 2
             "has_fraud_flag": rejected_count >= 2,
         }
+        memories = await list_active_memories(
+            str(user_id),
+            tenant_id=str(get_state_val(state, "tenant_id", "default") or "default"),
+            memory_types=["dispute_history", "risk_signal", "preference"],
+            session_factory=resolve_session_factory(AsyncSessionLocal),
+        )
+        user_history["long_term_memories"] = memories
+        if any(
+            memory["type"] in {"dispute_history", "risk_signal"}
+            and memory["importance"] >= 80
+            and memory["confidence"] >= 0.8
+            for memory in memories
+        ):
+            user_history["has_fraud_flag"] = True
 
         logger.info(
             "user_history_fetched",
@@ -89,6 +103,7 @@ async def fetch_user_history_node(state: AgentState) -> dict:
                 "rejected_count": 0,
                 "is_high_frequency": False,
                 "has_fraud_flag": False,
+                "long_term_memories": [],
             },
             "current_step": "fetch_user_history_done",
         }

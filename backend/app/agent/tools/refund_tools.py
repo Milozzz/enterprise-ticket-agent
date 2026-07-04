@@ -7,7 +7,6 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from app.core.config import get_settings
 from app.db.ticket_repository import deterministic_refund_id
-from datetime import datetime
 
 settings = get_settings()
 

@@ -1,6 +1,6 @@
 {
-  "version": "2026-05-20.v1",
-  "default_action_effect": "allow",
+  "version": "2026-06-27.v2",
+  "default_action_effect": "deny",
   "actions": {
     "approve_refund": {
       "description": "Approve a high-risk refund after HITL review.",
@@ -66,6 +66,31 @@
       "description": "Reject an employee reimbursement request after HITL review.",
       "allowed_roles": ["MANAGER", "FINANCE"],
       "risk_level": "medium"
+    },
+    "erp_get_order": {
+      "description": "Read an order through a governed ERP connector.",
+      "allowed_roles": ["USER", "AGENT", "MANAGER", "FINANCE", "AUDITOR"],
+      "risk_level": "low"
+    },
+    "erp_query_doctype": {
+      "description": "Query an allow-listed ERP business object.",
+      "allowed_roles": ["USER", "AGENT", "MANAGER", "FINANCE", "AUDITOR"],
+      "risk_level": "low"
+    },
+    "erp_create_credit_memo": {
+      "description": "Create a credit memo after policy and approval gates pass.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE"],
+      "risk_level": "high"
+    },
+    "erp_clear_open_item": {
+      "description": "Clear a customer open item after financial approval.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE"],
+      "risk_level": "high"
+    },
+    "erp_reverse_document": {
+      "description": "Reverse a financial document as a controlled compensation.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE"],
+      "risk_level": "high"
     }
   },
   "refund_review": {

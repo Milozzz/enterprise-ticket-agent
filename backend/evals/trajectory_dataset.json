@@ -1,0 +1,90 @@
+{
+  "version": "2.0",
+  "description": "Golden end-to-end trajectories for configurable supervisor scenarios",
+  "cases": [
+    {
+      "id": "T001",
+      "scenario_id": "permission_request",
+      "message": "permission request GitHub admin access for production release",
+      "expect": {
+        "intent": "permission_request",
+        "approval_required": true,
+        "permission_system": "GitHub",
+        "permission_level": "admin",
+        "route": ["supervisor_router", "permission_request", "generic_human_review"],
+        "tool_sequence": ["create_permission_request"],
+        "final_status": "pending_review"
+      }
+    },
+    {
+      "id": "T002",
+      "scenario_id": "permission_request",
+      "message": "申请 Jira 只读权限，用于查看项目进度",
+      "expect": {
+        "intent": "permission_request",
+        "approval_required": false,
+        "permission_system": "Jira",
+        "permission_level": "read",
+        "route": ["supervisor_router", "permission_request", "finalize_business_request"],
+        "tool_sequence": ["create_permission_request"],
+        "final_status": "auto_approved"
+      }
+    },
+    {
+      "id": "T003",
+      "scenario_id": "permission_request",
+      "message": "申请财务系统只读权限用于月末对账",
+      "expect": {
+        "intent": "permission_request",
+        "approval_required": true,
+        "permission_system": "Finance",
+        "permission_level": "read",
+        "route": ["supervisor_router", "permission_request", "generic_human_review"],
+        "tool_sequence": ["create_permission_request"],
+        "final_status": "pending_review"
+      }
+    },
+    {
+      "id": "T004",
+      "scenario_id": "reimbursement",
+      "message": "reimbursement 1200 travel expense invoice",
+      "expect": {
+        "intent": "reimbursement",
+        "approval_required": true,
+        "reimbursement_amount": 1200.0,
+        "reimbursement_category": "travel",
+        "route": ["supervisor_router", "reimbursement", "generic_human_review"],
+        "tool_sequence": ["create_reimbursement_request"],
+        "final_status": "pending_review"
+      }
+    },
+    {
+      "id": "T005",
+      "scenario_id": "reimbursement",
+      "message": "报销 80 元工作餐发票",
+      "expect": {
+        "intent": "reimbursement",
+        "approval_required": false,
+        "reimbursement_amount": 80.0,
+        "reimbursement_category": "meal",
+        "route": ["supervisor_router", "reimbursement", "finalize_business_request"],
+        "tool_sequence": ["create_reimbursement_request"],
+        "final_status": "auto_approved"
+      }
+    },
+    {
+      "id": "T006",
+      "scenario_id": "reimbursement",
+      "message": "客户招待费用报销 300 元",
+      "expect": {
+        "intent": "reimbursement",
+        "approval_required": true,
+        "reimbursement_amount": 300.0,
+        "reimbursement_category": "entertainment",
+        "route": ["supervisor_router", "reimbursement", "generic_human_review"],
+        "tool_sequence": ["create_reimbursement_request"],
+        "final_status": "pending_review"
+      }
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 LangGraph 状态定义 — 使用 TypedDict 确保 state 始终为 dict
 """
 
-from typing import Annotated, Literal
+from typing import Annotated
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
@@ -22,6 +22,11 @@ class AgentState(TypedDict, total=False):
     refund_description: str
     order_detail: dict
     order_amount: float
+    currency: str
+    tenant_id: str
+    connector_id: str
+    open_item_id: str
+    refund_request_id: str
     risk_score: int
     risk_level: str
     risk_reasons: list
@@ -29,11 +34,20 @@ class AgentState(TypedDict, total=False):
     refund_id: str
     refund_success: bool
     refund_message: str
+    saga_id: str
+    saga_status: str
+    saga_steps: list
+    credit_memo_id: str
+    clearing_document_id: str
+    compensation: dict
     notification_sent: bool
     notification_email_id: str
     human_decision: str
     reviewer_id: str
     review_comment: str
+    approval_id: str
+    approval_stage_index: int
+    approval_history: Annotated[list, operator.add]
     current_step: str
     error_message: str
     reply_text: str   # answer_node 的正常回复文本（区别于错误信息）
@@ -54,6 +68,8 @@ class AgentState(TypedDict, total=False):
     reimbursement_category: str
     tool_gateway_events: Annotated[list, operator.add]
     policy_events: Annotated[list, operator.add]
+    prompt_events: Annotated[list, operator.add]
+    specialist_handoffs: Annotated[list, operator.add]
     # RAG 政策检索结果（answer_policy_node 填充）
     policy_results: list
     policy_citations: list

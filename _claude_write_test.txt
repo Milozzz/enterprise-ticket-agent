@@ -1,0 +1,2 @@
+这是 Claude 的写入权限测试文件,可以删除。
+This is a write-permission test file created by Claude. Safe to delete.

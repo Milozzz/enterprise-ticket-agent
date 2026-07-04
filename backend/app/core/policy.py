@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
+
+from app.core.config import get_settings
 
 
 DEFAULT_POLICY_PATH = Path(__file__).resolve().parents[1] / "policies" / "agent_policy.json"
@@ -20,6 +23,8 @@ class PolicyDecision:
     requires_human_review: bool = False
     matched_rules: tuple[str, ...] = ()
     reason: str = ""
+    policy_variant: str = "stable"
+    rollout_bucket: int = 0
 
     def to_audit_event(self) -> dict[str, Any]:
         return {
@@ -29,6 +34,8 @@ class PolicyDecision:
             "requires_human_review": self.requires_human_review,
             "matched_rules": list(self.matched_rules),
             "reason": self.reason,
+            "policy_variant": self.policy_variant,
+            "rollout_bucket": self.rollout_bucket,
         }
 
 
@@ -42,12 +49,29 @@ def get_policy_version() -> str:
     return str(load_policy().get("version", "unknown"))
 
 
+def select_policy(routing_key: str = "global") -> tuple[dict[str, Any], str, int]:
+    stable = load_policy()
+    settings = get_settings()
+    bucket = int(hashlib.sha256(str(routing_key or "global").encode()).hexdigest()[:8], 16) % 100
+    percent = min(max(settings.policy_canary_percent, 0), 100)
+    if not settings.policy_canary_json.strip() or bucket >= percent:
+        return stable, "stable", bucket
+    try:
+        candidate = json.loads(settings.policy_canary_json)
+        if not isinstance(candidate, dict) or not candidate.get("version"):
+            return stable, "stable", bucket
+        return candidate, "canary", bucket
+    except (TypeError, ValueError):
+        return stable, "stable", bucket
+
+
 def evaluate_action_policy(
     role: str,
     action: str,
     attributes: Mapping[str, Any] | None = None,
+    routing_key: str = "global",
 ) -> PolicyDecision:
-    policy = load_policy()
+    policy, variant, bucket = select_policy(routing_key)
     action_policy = policy.get("actions", {}).get(action)
     version = str(policy.get("version", "unknown"))
     normalized_role = str(role or "").upper()
@@ -61,6 +85,8 @@ def evaluate_action_policy(
             allowed=allowed,
             matched_rules=("default_action_effect",),
             reason=f"Action '{action}' uses default policy effect '{default_effect}'.",
+            policy_variant=variant,
+            rollout_bucket=bucket,
         )
 
     allowed_roles = {str(item).upper() for item in action_policy.get("allowed_roles", [])}
@@ -77,11 +103,13 @@ def evaluate_action_policy(
         allowed=allowed,
         matched_rules=(f"actions.{action}.allowed_roles",),
         reason=reason,
+        policy_variant=variant,
+        rollout_bucket=bucket,
     )
 
 
-def allowed_roles_for_action(action: str) -> set[str] | None:
-    action_policy = load_policy().get("actions", {}).get(action)
+def allowed_roles_for_action(action: str, routing_key: str = "global") -> set[str] | None:
+    action_policy = select_policy(routing_key)[0].get("actions", {}).get(action)
     if action_policy is None:
         return None
     return {str(item).upper() for item in action_policy.get("allowed_roles", [])}
@@ -93,8 +121,9 @@ def evaluate_refund_review_policy(
     risk_score: int,
     risk_level: str,
     user_history: Mapping[str, Any] | None = None,
+    routing_key: str = "global",
 ) -> PolicyDecision:
-    policy = load_policy()
+    policy, variant, bucket = select_policy(routing_key)
     version = str(policy.get("version", "unknown"))
     attributes = {
         "amount": float(amount or 0),
@@ -116,6 +145,8 @@ def evaluate_refund_review_policy(
             requires_human_review=True,
             matched_rules=tuple(matched),
             reason="Refund review policy requires HITL.",
+            policy_variant=variant,
+            rollout_bucket=bucket,
         )
 
     return PolicyDecision(
@@ -125,6 +156,8 @@ def evaluate_refund_review_policy(
         requires_human_review=False,
         matched_rules=(),
         reason="No refund review policy rule matched.",
+        policy_variant=variant,
+        rollout_bucket=bucket,
     )
 
 
@@ -132,8 +165,9 @@ def evaluate_permission_request_policy(
     *,
     system: str,
     permission_level: str,
+    routing_key: str = "global",
 ) -> PolicyDecision:
-    policy = load_policy()
+    policy, variant, bucket = select_policy(routing_key)
     version = str(policy.get("version", "unknown"))
     attributes = {
         "system": _normalize_text(system),
@@ -153,6 +187,8 @@ def evaluate_permission_request_policy(
             requires_human_review=True,
             matched_rules=tuple(matched),
             reason="Permission request policy requires HITL.",
+            policy_variant=variant,
+            rollout_bucket=bucket,
         )
 
     return PolicyDecision(
@@ -162,6 +198,8 @@ def evaluate_permission_request_policy(
         requires_human_review=False,
         matched_rules=(),
         reason="No permission request policy rule matched.",
+        policy_variant=variant,
+        rollout_bucket=bucket,
     )
 
 
@@ -169,8 +207,9 @@ def evaluate_reimbursement_policy(
     *,
     amount: float,
     category: str,
+    routing_key: str = "global",
 ) -> PolicyDecision:
-    policy = load_policy()
+    policy, variant, bucket = select_policy(routing_key)
     version = str(policy.get("version", "unknown"))
     attributes = {
         "amount": float(amount or 0),
@@ -190,6 +229,8 @@ def evaluate_reimbursement_policy(
             requires_human_review=True,
             matched_rules=tuple(matched),
             reason="Reimbursement policy requires HITL.",
+            policy_variant=variant,
+            rollout_bucket=bucket,
         )
 
     return PolicyDecision(
@@ -199,6 +240,8 @@ def evaluate_reimbursement_policy(
         requires_human_review=False,
         matched_rules=(),
         reason="No reimbursement policy rule matched.",
+        policy_variant=variant,
+        rollout_bucket=bucket,
     )
 
 

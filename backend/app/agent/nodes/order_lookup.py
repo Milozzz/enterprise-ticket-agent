@@ -80,9 +80,35 @@ async def lookup_order_node(state: AgentState) -> dict:
             "data": order_data,
         }
 
+        erp_context = order_data.get("erpContext") or {}
+        open_items = erp_context.get("openItems") or []
+        open_item = next(
+            (
+                item
+                for item in open_items
+                if not item.get("clearing_document_id")
+                and not item.get("clearingDocument")
+            ),
+            {},
+        )
+        connectors = erp_context.get("connectors") or []
+        connector = next(
+            (item for item in connectors if item.get("status") in {"ACTIVE", "active"}),
+            connectors[0] if connectors else {},
+        )
+        canonical_order_id = order_data.get("canonicalId", order_id)
+
         return {
+            "order_id": canonical_order_id,
             "order_detail": order_data,
             "order_amount": order_data.get("totalAmount", 0.0),
+            "currency": str(order_data.get("currency") or "CNY").upper(),
+            "open_item_id": str(
+                open_item.get("open_item_id")
+                or open_item.get("openItemId")
+                or f"OI-AR-{canonical_order_id}"
+            ),
+            "connector_id": str(connector.get("connector_id") or "CONN-MOCK-ERP"),
             "user_id": order_data.get("userId", get_state_val(state, "user_id", "unknown")),
             "current_step": "lookup_order_done",
             "tool_gateway_events": [gateway_result.audit_event],

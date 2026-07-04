@@ -6,71 +6,60 @@
 import json
 import re
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import BaseModel
 
+from app.agent.dependencies import get_agent_dependencies
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.llm.gateway import LLMCallContext
+from app.llm.prompt_registry import PromptSelection, get_prompt_registry
 
 logger = get_logger(__name__)
 settings = get_settings()
 
 # 模块级单例：避免每次分类请求都重新创建 LLM 实例
 # 使用结构化输出版本（response_mime_type=application/json）
-_llm_structured: ChatGoogleGenerativeAI | None = None
-_llm_fallback: ChatGoogleGenerativeAI | None = None
+class IntentClassification(BaseModel):
+    intent: str
+    order_id: str = ""
+    reason: str = "other"
+    description: str = ""
+    user_id: str = "unknown"
 
 
-def _get_llm_structured() -> ChatGoogleGenerativeAI:
+def _get_llm_structured(
+    context: LLMCallContext | None = None,
+    prompt: PromptSelection | None = None,
+):
     """结构化 JSON 输出版本（Gemini 原生支持，100% 不返回非 JSON）"""
-    global _llm_structured
-    if _llm_structured is None:
-        if not settings.google_api_key:
-            raise ValueError("请配置 GOOGLE_API_KEY")
-        _llm_structured = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=settings.model_temperature,
-            # Gemini 结构化输出：强制 100% 返回合法 JSON，无需正则提取
-            generation_config={
-                "response_mime_type": "application/json",
-                "response_schema": {
-                    "type": "object",
-                    "properties": {
-                        "intent": {
-                            "type": "string",
-                            "enum": ["refund", "query_order", "query_policy",
-                                     "track_logistics", "escalate", "other"],
-                        },
-                        "order_id": {"type": "string"},
-                        "reason": {
-                            "type": "string",
-                            "enum": ["damaged", "wrong_item", "not_received",
-                                     "quality_issue", "other"],
-                        },
-                        "description": {"type": "string"},
-                        "user_id": {"type": "string"},
-                    },
-                    "required": ["intent"],
-                },
-            },
-        )
-    return _llm_structured
+    return get_agent_dependencies().llm.runnable(
+        "classify_intent",
+        context=context,
+        schema=IntentClassification,
+        temperature=0.0,
+        timeout_seconds=5.0,
+        prompt_version=prompt.version if prompt else None,
+        prompt_variant=prompt.variant if prompt else None,
+        prompt_rollout_bucket=prompt.rollout_bucket if prompt else None,
+    )
 
 
-def _get_llm_fallback() -> ChatGoogleGenerativeAI:
+def _get_llm_fallback(
+    context: LLMCallContext | None = None,
+    prompt: PromptSelection | None = None,
+):
     """无结构化输出的降级版本（老模型兼容 / response_schema 不支持时）"""
-    global _llm_fallback
-    if _llm_fallback is None:
-        if not settings.google_api_key:
-            raise ValueError("请配置 GOOGLE_API_KEY")
-        _llm_fallback = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=settings.model_temperature,
-        )
-    return _llm_fallback
+    return get_agent_dependencies().llm.runnable(
+        "classify_intent",
+        context=context,
+        temperature=0.0,
+        timeout_seconds=5.0,
+        prompt_version=prompt.version if prompt else None,
+        prompt_variant=prompt.variant if prompt else None,
+        prompt_rollout_bucket=prompt.rollout_bucket if prompt else None,
+    )
 
 SYSTEM_PROMPT = """你是一个企业客服工单分类助手。
 从用户输入中提取以下信息，以 JSON 格式返回：
@@ -144,7 +133,14 @@ async def classify_intent_node(state: AgentState) -> dict:
     else:
         try:
             # 优先尝试 LLM 解析
-            parsed = await _llm_classify(user_message)
+            parsed = await _llm_classify(
+                user_message,
+                LLMCallContext(
+                    thread_id=str(get_state_val(state, "thread_id", "unknown")),
+                    trace_id=str(get_state_val(state, "trace_id", "") or "") or None,
+                    tenant_id=str(get_state_val(state, "tenant_id", "") or "") or None,
+                ),
+            )
         except Exception as e:
             logger.warning("llm_classify_failed_fallback_to_rules", error=str(e))
             # LLM 不可用时降级为规则引擎
@@ -182,6 +178,7 @@ async def classify_intent_node(state: AgentState) -> dict:
         order_id=order_id,
         method=parsed.get("_method", "llm"),
     )
+    prompt_event = parsed.pop("_prompt_event", None)
 
     return {
         "intent": intent,
@@ -191,10 +188,14 @@ async def classify_intent_node(state: AgentState) -> dict:
         "refund_description": parsed.get("description", user_message),
         "current_step": "classify_intent_done",
         "ui_events": [ui_event],
+        "prompt_events": [prompt_event] if prompt_event else [],
     }
 
 
-async def _llm_classify(user_message: str) -> dict:
+async def _llm_classify(
+    user_message: str,
+    context: LLMCallContext | None = None,
+) -> dict:
     """
     调用 LLM 解析意图。
 
@@ -202,33 +203,42 @@ async def _llm_classify(user_message: str) -> dict:
     保证 100% 返回合法 JSON，无需正则提取。
     结构化输出失败时降级为文本提取（兼容旧模型或 API 变更）。
     """
-    import asyncio
-
+    selection = get_prompt_registry().select(
+        "classify_intent",
+        SYSTEM_PROMPT,
+        routing_key=(context.thread_id if context else user_message),
+        default_version="classifier-v1",
+    )
     messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=selection.template),
         HumanMessage(content=user_message),
     ]
 
-    # 优先：结构化 JSON 输出（无需正则）
+    # Provider-neutral structured output; the gateway owns failover and usage accounting.
     try:
-        llm = _get_llm_structured()
-        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=5.0)
-        result = json.loads(response.content)
+        response = await _get_llm_structured(context, selection).ainvoke(messages)
+        if isinstance(response, BaseModel):
+            result = response.model_dump()
+        elif isinstance(response, dict):
+            result = dict(response)
+        else:
+            result = json.loads(response.content)
         result["_method"] = "llm_structured"
+        result["_prompt_event"] = selection.to_audit_event()
         return result
     except Exception as e:
         logger.warning("llm_structured_output_failed", error=str(e))
 
     # 降级：文本输出 + 正则提取
     try:
-        llm = _get_llm_fallback()
-        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=5.0)
+        response = await _get_llm_fallback(context, selection).ainvoke(messages)
         content = response.content
         json_match = re.search(r"\{.*\}", content, re.DOTALL)
         if not json_match:
             raise ValueError(f"LLM 未返回有效 JSON: {content}")
         result = json.loads(json_match.group())
         result["_method"] = "llm_regex"
+        result["_prompt_event"] = selection.to_audit_event()
         return result
     except Exception as e:
         logger.error("llm_invoke_error", error=str(e))

@@ -7,14 +7,17 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
+from app.core.auth import get_current_user
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
-from app.db.models import AuditLog, Order, RefundLog, Ticket, TicketStatus
+from app.db.models import AuditLog, LLMUsageRecord, Order, RefundLog, Ticket, TicketStatus
+from app.erp.metrics import get_erp_business_metrics
 
 logger = get_logger(__name__)
-router = APIRouter()
+# 运营数据（成本、失败链路、业务量）必须登录后才能访问。
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 # 人工审批超时阈值（超过此时长仍处于 PENDING 视为超时）
 APPROVAL_TIMEOUT_HOURS = 24
@@ -340,3 +343,137 @@ async def get_failed_traces(limit: int = 20):
     except Exception as e:
         logger.error("failed_traces_error", error=str(e))
         return []
+
+
+@router.get("/llm-costs")
+async def get_llm_costs(days: int = 7, session_limit: int = 10):
+    """Provider-neutral token, latency, failover, and estimated-cost report."""
+
+    days = min(max(days, 1), 90)
+    session_limit = min(max(session_limit, 1), 100)
+    since = datetime.utcnow() - timedelta(days=days)
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(LLMUsageRecord).where(LLMUsageRecord.created_at >= since)
+                )
+            ).scalars().all()
+
+        daily: dict[str, dict] = {}
+        sessions: dict[str, dict] = {}
+        providers: dict[str, dict] = {}
+        nodes: dict[str, dict] = {}
+        prompt_versions: dict[str, dict] = {}
+
+        def bucket(store: dict[str, dict], key: str) -> dict:
+            return store.setdefault(
+                key,
+                {
+                    "calls": 0,
+                    "failed_calls": 0,
+                    "fallback_calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                    "latency_ms": 0,
+                },
+            )
+
+        for row in rows:
+            targets = (
+                bucket(daily, row.created_at.strftime("%Y-%m-%d")),
+                bucket(sessions, row.thread_id),
+                bucket(providers, f"{row.provider}:{row.model}"),
+                bucket(nodes, row.node_name),
+                bucket(
+                    prompt_versions,
+                    f"{row.node_name}:{row.prompt_version or 'unknown'}:{row.prompt_variant or 'stable'}",
+                ),
+            )
+            for target in targets:
+                target["calls"] += 1
+                target["failed_calls"] += 0 if row.success else 1
+                target["fallback_calls"] += 1 if row.fallback_index > 0 else 0
+                target["prompt_tokens"] += row.prompt_tokens or 0
+                target["completion_tokens"] += row.completion_tokens or 0
+                target["total_tokens"] += row.total_tokens or 0
+                target["estimated_cost_usd"] += float(row.total_cost_usd or 0)
+                target["latency_ms"] += row.latency_ms or 0
+
+        def records(store: dict[str, dict], label: str) -> list[dict]:
+            result = []
+            for key, value in store.items():
+                calls = value["calls"]
+                total_latency = value["latency_ms"]
+                public_value = {item_key: item_value for item_key, item_value in value.items() if item_key != "latency_ms"}
+                result.append({
+                    label: key,
+                    **public_value,
+                    "estimated_cost_usd": round(value["estimated_cost_usd"], 8),
+                    "avg_latency_ms": round(total_latency / calls, 1) if calls else 0,
+                    "failure_rate": round(value["failed_calls"] / calls, 4) if calls else 0,
+                    "fallback_rate": round(value["fallback_calls"] / calls, 4) if calls else 0,
+                })
+            return result
+
+        daily_rows = sorted(records(daily, "date"), key=lambda item: item["date"])
+        session_rows = sorted(
+            records(sessions, "thread_id"),
+            key=lambda item: item["estimated_cost_usd"],
+            reverse=True,
+        )[:session_limit]
+        provider_rows = sorted(records(providers, "provider_model"), key=lambda item: item["calls"], reverse=True)
+        node_rows = sorted(records(nodes, "node"), key=lambda item: item["calls"], reverse=True)
+        prompt_version_rows = sorted(
+            records(prompt_versions, "node_prompt_variant"),
+            key=lambda item: item["calls"],
+            reverse=True,
+        )
+        return {
+            "window_days": days,
+            "totals": {
+                "calls": sum(item["calls"] for item in daily_rows),
+                "total_tokens": sum(item["total_tokens"] for item in daily_rows),
+                "estimated_cost_usd": round(sum(item["estimated_cost_usd"] for item in daily_rows), 8),
+                "failed_calls": sum(item["failed_calls"] for item in daily_rows),
+                "fallback_calls": sum(item["fallback_calls"] for item in daily_rows),
+            },
+            "daily": daily_rows,
+            "sessions": session_rows,
+            "providers": provider_rows,
+            "nodes": node_rows,
+            "prompt_versions": prompt_version_rows,
+            "pricing": "configurable_estimate",
+        }
+    except Exception as e:
+        logger.error("llm_cost_report_error", error=str(e))
+        return {
+            "window_days": days,
+            "totals": {"calls": 0, "total_tokens": 0, "estimated_cost_usd": 0, "failed_calls": 0, "fallback_calls": 0},
+            "daily": [],
+            "sessions": [],
+            "providers": [],
+            "nodes": [],
+            "prompt_versions": [],
+            "pricing": "configurable_estimate",
+            "error": str(e),
+        }
+
+
+@router.get("/erp-business-metrics")
+async def get_erp_metrics(days: int = 7):
+    """Return connector reliability, business outcomes, and SLO status."""
+
+    try:
+        return await get_erp_business_metrics(days=days)
+    except Exception as e:
+        logger.error("erp_business_metrics_error", error=str(e))
+        return {
+            "window_days": days,
+            "connector_executions": {},
+            "business_outcomes": {},
+            "operations": [],
+            "slo": {"met": False, "error": str(e)},
+        }

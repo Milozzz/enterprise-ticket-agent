@@ -147,3 +147,33 @@ export interface NodeLatencyStat {
   completion_tokens?: number;
   total_tokens?: number;
 }
+
+export interface LlmCostBucket {
+  calls: number;
+  failed_calls: number;
+  fallback_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  avg_latency_ms: number;
+  failure_rate: number;
+  fallback_rate: number;
+}
+
+export interface LlmCostReport {
+  window_days: number;
+  totals: {
+    calls: number;
+    total_tokens: number;
+    estimated_cost_usd: number;
+    failed_calls: number;
+    fallback_calls: number;
+  };
+  daily: Array<LlmCostBucket & { date: string }>;
+  sessions: Array<LlmCostBucket & { thread_id: string }>;
+  providers: Array<LlmCostBucket & { provider_model: string }>;
+  nodes: Array<LlmCostBucket & { node: string }>;
+  pricing: "configurable_estimate";
+  error?: string;
+}

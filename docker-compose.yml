@@ -59,12 +59,40 @@ services:
       # 覆盖 .env 中的本地地址，指向 compose 内部服务名
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ticketuser}:${POSTGRES_PASSWORD:-ticketpass}@postgres:5432/${POSTGRES_DB:-ticketdb}
       REDIS_URL: redis://redis:6379
+      AGENT_JOB_WORKER_ENABLED: "true"
+      APPROVAL_ESCALATION_WORKER_ENABLED: "true"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     command: ["/app/start.sh"]
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ticket_integration_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ticketuser}:${POSTGRES_PASSWORD:-ticketpass}@postgres:5432/${POSTGRES_DB:-ticketdb}
+      LANGGRAPH_STRICT_MSGPACK: "true"
+      REDIS_URL: redis://redis:6379
+      OUTBOX_WORKER_ID: compose-integration-worker
+      A2A_WORKER_ID: compose-a2a-worker
+      A2A_WORKER_TENANTS: ${DEFAULT_TENANT_ID:-TENANT-DEMO-COMMERCE}
+      AGENT_JOB_WORKER_ENABLED: "true"
+      AGENT_JOB_WORKER_ID: compose-agent-job-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    command: ["python", "-m", "app.erp.worker_main"]
 
   # ── Frontend (Next.js) ────────────────────────────────────
   frontend:
@@ -81,6 +109,7 @@ services:
     environment:
       # 服务端 route handler 用（server → backend 走 compose 内网）
       BACKEND_URL: http://backend:8000
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-change-me-and-share-with-frontend-server-only}
     depends_on:
       - backend
 

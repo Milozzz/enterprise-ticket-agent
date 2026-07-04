@@ -25,6 +25,8 @@ backend/.env.*
 *.sqlite
 *.sqlite3
 backend/evals/results_*.json
+backend/evals/*_latest.json
+!backend/evals/eval_report_sample.json
 
 # Node / Next.js
 node_modules/

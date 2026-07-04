@@ -59,10 +59,21 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
+    def compare_type(context, inspected_column, metadata_column, inspected_type, metadata_type):
+        # SQLite stores enums as VARCHAR; treating that representation as drift
+        # makes `alembic check` fail even when the migration is correct.
+        if connection.dialect.name == "sqlite":
+            from sqlalchemy import Enum, String
+
+            if isinstance(metadata_type, Enum) and isinstance(inspected_type, String):
+                return False
+        return None
+
     context.configure(
         connection=connection, 
         target_metadata=target_metadata,
         render_as_batch=True,
+        compare_type=compare_type,
     )
 
     with context.begin_transaction():

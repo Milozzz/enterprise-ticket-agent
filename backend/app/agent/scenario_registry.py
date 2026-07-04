@@ -7,6 +7,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 import shutil
+import re
 from typing import Any
 
 from app.agent.router_fallback import token_embedding_similarity
@@ -21,6 +22,23 @@ DEFAULT_SCENARIO_DIR = (
     else BUNDLED_SCENARIO_DIR
 )
 DEFAULT_SCENARIO_ID = "refund"
+
+
+def _keyword_matches(text: str, keyword: str) -> bool:
+    """Match exact keywords plus separated CJK concepts such as 申请...权限."""
+    normalized = keyword.strip().lower()
+    if not normalized:
+        return False
+    if normalized in text:
+        return True
+
+    cjk = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
+    if len(cjk) >= 4:
+        bigrams = {cjk[index : index + 2] for index in range(len(cjk) - 1)}
+        return sum(1 for token in bigrams if token in text) >= 2
+
+    words = [word for word in re.findall(r"[a-z0-9_]+", normalized) if len(word) > 2]
+    return bool(words) and all(word in text for word in words)
 
 
 @dataclass(frozen=True)
@@ -175,7 +193,9 @@ class ScenarioRegistry:
         best_keywords: tuple[str, ...] = ()
 
         for config in self._scenarios.values():
-            matched = tuple(keyword for keyword in config.keywords if keyword and keyword in text)
+            matched = tuple(
+                keyword for keyword in config.keywords if _keyword_matches(text, keyword)
+            )
             if len(matched) > len(best_keywords):
                 best_config = config
                 best_keywords = matched

@@ -14,11 +14,14 @@ from __future__ import annotations
 
 from langchain_core.messages import SystemMessage
 
+from app.agent.dependencies import get_agent_dependencies
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.agent.tools.ticket_tools import get_ticket_status
 from app.core.logging import get_logger
 from app.core.config import get_settings
+from app.llm.gateway import LLMCallContext
+from app.llm.prompt_registry import PromptSelection, get_prompt_registry
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -41,17 +44,27 @@ _SYSTEM_PROMPT = """你是企业智能客服助手，专注于退款和订单查
 _llm_with_tools = None
 
 
-def _get_llm():
-    global _llm_with_tools
-    if _llm_with_tools is None and settings.google_api_key:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        base = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=0.3,
-        )
-        _llm_with_tools = base.bind_tools(ANSWER_TOOLS)
-    return _llm_with_tools
+def _get_llm(
+    context: LLMCallContext | None = None,
+    prompt: PromptSelection | None = None,
+):
+    provider_keys = (
+        getattr(settings, "google_api_key", ""),
+        getattr(settings, "openai_api_key", ""),
+        getattr(settings, "anthropic_api_key", ""),
+    )
+    if not any(isinstance(value, str) and value.strip() for value in provider_keys):
+        return None
+    return get_agent_dependencies().llm.runnable(
+        "answer",
+        context=context,
+        tools=ANSWER_TOOLS,
+        temperature=0.3,
+        timeout_seconds=10.0,
+        prompt_version=prompt.version if prompt else None,
+        prompt_variant=prompt.variant if prompt else None,
+        prompt_rollout_bucket=prompt.rollout_bucket if prompt else None,
+    )
 
 
 async def answer_node(state: AgentState) -> dict:
@@ -77,13 +90,25 @@ async def answer_node(state: AgentState) -> dict:
         },
     }
 
-    llm = _get_llm()
+    context = LLMCallContext(
+            thread_id=str(get_state_val(state, "thread_id", "unknown")),
+            trace_id=str(get_state_val(state, "trace_id", "") or "") or None,
+            tenant_id=str(get_state_val(state, "tenant_id", "") or "") or None,
+    )
+    prompt = get_prompt_registry().select(
+        "answer",
+        _SYSTEM_PROMPT,
+        routing_key=context.thread_id,
+        default_version="answer-v1",
+    )
+    llm = _get_llm(context, prompt)
     if not llm:
         return {
             "current_step": "answer_done",
             "is_completed": True,
             "reply_text": _fallback_reply(),
             "ui_events": [ui_thinking],
+            "prompt_events": [prompt.to_audit_event()],
         }
 
     # 取 state.messages（已包含历史 + 工具结果，由 add_messages 累积）
@@ -92,7 +117,7 @@ async def answer_node(state: AgentState) -> dict:
     # 首次进入：在消息前插入 system prompt
     has_system = any(getattr(m, "type", "") == "system" for m in messages)
     if not has_system:
-        messages = [SystemMessage(content=_SYSTEM_PROMPT)] + messages
+        messages = [SystemMessage(content=prompt.template)] + messages
 
     try:
         import asyncio
@@ -106,6 +131,7 @@ async def answer_node(state: AgentState) -> dict:
             "is_completed": True,
             "reply_text": _fallback_reply(),
             "ui_events": [ui_thinking],
+            "prompt_events": [prompt.to_audit_event()],
         }
 
     ui_thinking["data"]["steps"][0]["status"] = "done"
@@ -118,6 +144,7 @@ async def answer_node(state: AgentState) -> dict:
             "messages": [response],  # add_messages 会追加
             "current_step": "answer_tool_calling",
             "ui_events": [ui_thinking],
+            "prompt_events": [prompt.to_audit_event()],
         }
     else:
         # 无工具调用：最终文本回复
@@ -128,6 +155,7 @@ async def answer_node(state: AgentState) -> dict:
             "is_completed": True,
             "reply_text": response.content,
             "ui_events": [ui_thinking],
+            "prompt_events": [prompt.to_audit_event()],
         }
 
 

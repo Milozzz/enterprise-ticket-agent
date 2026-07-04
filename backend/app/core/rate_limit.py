@@ -58,8 +58,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not any(path.startswith(p) for p in _RATE_LIMITED_PREFIXES):
             return await call_next(request)
 
-        import os
-        if os.environ.get("TESTING") == "1":
+        from app.core.config import testing_mode_active
+        if testing_mode_active():
             return await call_next(request)
 
         settings = get_settings()
@@ -67,14 +67,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window = 60  # seconds
 
         try:
-            import redis as _redis
-            url = settings.upstash_redis_url or settings.redis_url
-            client = _redis.from_url(url, decode_responses=True, socket_connect_timeout=1)
+            from app.db.redis_client import get_redis
+            client = await get_redis()
+            if client is None:
+                # Redis 不可用 → fail-open，放行请求
+                return await call_next(request)
 
             key = _extract_user_key(request)
-            current = client.incr(key)
+            current = await client.incr(key)
             if current == 1:
-                client.expire(key, window)
+                await client.expire(key, window)
 
             remaining = max(0, rpm - current)
             reset_at = int(time.time()) + window
