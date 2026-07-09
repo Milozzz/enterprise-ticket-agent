@@ -85,6 +85,26 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # A2：OIDC 启用时，RS256/ES256 token 走外部 IdP 验证（JWKS），
+    # HS256 token 继续走本地验证——迁移期两类 token 并存。
+    from app.core.oidc import (
+        OIDCConfigError,
+        OIDCTokenError,
+        oidc_enabled,
+        token_uses_oidc,
+        verify_oidc_token,
+    )
+
+    if oidc_enabled() and token_uses_oidc(credentials.credentials):
+        try:
+            return await verify_oidc_token(credentials.credentials)
+        except (OIDCTokenError, OIDCConfigError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"SSO token 验证失败: {exc}",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     payload = _decode_token(credentials.credentials)
     user_id = payload.get("sub")
     role = payload.get("role", "USER")
@@ -117,6 +137,21 @@ async def get_optional_user(
 
     if credentials is None:
         return None
+
+    from app.core.oidc import (
+        OIDCConfigError,
+        OIDCTokenError,
+        oidc_enabled,
+        token_uses_oidc,
+        verify_oidc_token,
+    )
+
+    if oidc_enabled() and token_uses_oidc(credentials.credentials):
+        try:
+            return await verify_oidc_token(credentials.credentials)
+        except (OIDCTokenError, OIDCConfigError):
+            return None
+
     try:
         payload = _decode_token(credentials.credentials)
         return {

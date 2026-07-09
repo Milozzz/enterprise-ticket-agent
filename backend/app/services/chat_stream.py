@@ -50,6 +50,32 @@ RESUME_NODES = {
     "finalize_business_request",
 }
 
+# 对话式 interrupt（A3 澄清 / A7 补槽）：用户的下一条普通消息就是 resume 输入，
+# 与审批类 interrupt（走 /resume 接口）区分开。
+CONVERSATIONAL_INTERRUPT_KINDS = {"clarification", "slot_filling"}
+
+
+def extract_interrupt_values(state: Any) -> list[dict]:
+    """从 StateSnapshot 中取出全部 pending interrupt 的 payload。"""
+    values: list[dict] = []
+    try:
+        for task in getattr(state, "tasks", ()) or ():
+            for intr in getattr(task, "interrupts", ()) or ():
+                value = getattr(intr, "value", None)
+                if isinstance(value, dict):
+                    values.append(value)
+    except Exception:  # interrupt 结构解析失败不应影响主流程
+        return values
+    return values
+
+
+def pending_conversational_interrupt(state: Any) -> dict | None:
+    """该 thread 是否停在等待用户回答的 interrupt 上（澄清/补槽）。"""
+    for value in extract_interrupt_values(state):
+        if str(value.get("kind") or "") in CONVERSATIONAL_INTERRUPT_KINDS:
+            return value
+    return None
+
 
 async def cached_sse_stream(chunks: list[str]) -> AsyncIterator[str]:
     for chunk in chunks:
@@ -146,9 +172,35 @@ async def stream_agent(
         final = graph.get_state(config)
         if final and final.values:
             if final.next:
+                interrupt_values = extract_interrupt_values(final)
+                # A3/A7：澄清与补槽 interrupt 直接把问题渲染给用户——
+                # 用户的下一条消息会作为 resume 输入继续这个 thread。
+                for value in interrupt_values:
+                    if str(value.get("kind") or "") in CONVERSATIONAL_INTERRUPT_KINDS:
+                        question = str(value.get("question") or "")
+                        if question:
+                            chunk = encode_sse("text", {"content": f"❓ {question}"})
+                            collected.append(chunk)
+                            yield chunk
+                        chunk = encode_sse(
+                            "ui",
+                            ui_event_payload(
+                                {
+                                    "type": "clarification_request",
+                                    "data": value,
+                                }
+                            ),
+                        )
+                        collected.append(chunk)
+                        yield chunk
                 chunk = encode_sse(
                     "interrupt",
-                    {"thread_id": thread_id, "trace_id": trace_id, "next": list(final.next)},
+                    {
+                        "thread_id": thread_id,
+                        "trace_id": trace_id,
+                        "next": list(final.next),
+                        "interrupts": interrupt_values,
+                    },
                 )
                 collected.append(chunk)
                 yield chunk
@@ -246,7 +298,44 @@ async def stream_resume(
                     graph_failed=True,
                 ):
                     yield chunk
+        elif graph_has_checkpoint:
+            # B2 幂等保护：checkpoint 存在但没有待恢复的 interrupt，说明该 thread 的
+            # decision 已被消费（重复点击 / 前端超时重试）。此时绝不能落入 direct DB
+            # fallback 重写工单状态（第二次 reject 会把已完成的工单翻成 REJECTED），
+            # 只回显既有结果，不产生任何新副作用。
+            prior_decision = str(
+                get_state_val(current_state.values, "human_decision", "") or ""
+            )
+            prior_reviewer = str(
+                get_state_val(current_state.values, "reviewer_id", "")
+                or request.reviewer_id
+            )
+            await audit_writer(
+                request.thread_id,
+                "resume_duplicate_ignored",
+                "idempotent_replay",
+                {"action": request.action, "reviewer_id": request.reviewer_id},
+                {"prior_decision": prior_decision, "prior_reviewer": prior_reviewer},
+            )
+            if prior_decision == "approve":
+                yield encode_sse("ui", timeline_builder(prior_reviewer))
+                yield encode_sse(
+                    "text",
+                    {"content": "ℹ️ 该审批此前已批准并处理完成，本次重复请求未执行任何操作。"},
+                )
+            elif prior_decision == "reject":
+                yield encode_sse(
+                    "text",
+                    {"content": "ℹ️ 该审批此前已被拒绝，本次重复请求未执行任何操作。"},
+                )
+            else:
+                yield encode_sse(
+                    "text",
+                    {"content": "ℹ️ 当前流程没有等待中的审批操作，未执行任何变更。"},
+                )
         else:
+            # checkpoint 丢失（如进程重启且非持久 checkpointer）——保留 direct DB
+            # 逃生通道，但这是唯一允许它执行的场景。
             async for chunk in _fallback_resume(
                 request=request,
                 current_state=current_state,

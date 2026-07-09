@@ -56,9 +56,38 @@ async def lifespan(app: FastAPI):
         runtime_graph, graph_resource = await graph_runtime.open_postgres_graph(
             get_settings().database_url
         )
-        graph_runtime.set_ticket_graph(runtime_graph)
+        graph_runtime.set_ticket_graph(runtime_graph, checkpointer_kind="postgres")
         chat.ticket_graph = runtime_graph
         logger.info("PostgreSQL LangGraph checkpointer enabled")
+
+        # B1: HITL 依赖 interrupt() 持久化——生产环境禁止在非持久 checkpointer 上服务，
+        # 否则重启即丢失全部"等待审批中"的流程且无感知。
+        if (
+            get_settings().environment == "production"
+            and graph_runtime.active_checkpointer_kind() != "postgres"
+        ):
+            raise RuntimeError(
+                "Durable checkpointer required in production; "
+                "refusing to serve HITL flows on a non-durable checkpointer"
+            )
+
+        # B1: 启动时报告仍在等待人工审批的任务数（重启后需靠持久 checkpointer 恢复的量）
+        try:
+            from sqlalchemy import func, select
+
+            from app.db.models import ApprovalTask
+
+            async with AsyncSessionLocal() as _session:
+                pending_approvals = await _session.scalar(
+                    select(func.count())
+                    .select_from(ApprovalTask)
+                    .where(ApprovalTask.status == "pending")
+                )
+            logger.info(
+                "hitl_pending_approvals_at_startup", count=int(pending_approvals or 0)
+            )
+        except Exception as exc:  # 指标缺失不阻断启动
+            logger.warning("hitl_pending_approvals_gauge_failed", error=str(exc))
 
     # 初始化 Langfuse 客户端（key 未配置时静默跳过）
     lf = get_langfuse_client()

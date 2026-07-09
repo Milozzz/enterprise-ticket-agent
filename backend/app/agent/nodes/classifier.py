@@ -143,8 +143,10 @@ async def classify_intent_node(state: AgentState) -> dict:
             )
         except Exception as e:
             logger.warning("llm_classify_failed_fallback_to_rules", error=str(e))
-            # LLM 不可用时降级为规则引擎
-            parsed = rule_parsed
+            # LLM 不可用时降级为规则引擎。B3：显式标注 degraded——降级产生的
+            # 分类决策必须可审计，且下游风控会因此强制人工审批。
+            parsed = dict(rule_parsed)
+            parsed["_degraded"] = True
 
     logger.info(
         "intent_classified",
@@ -168,6 +170,9 @@ async def classify_intent_node(state: AgentState) -> dict:
     detail = f"识别意图：{intent_label}"
     if order_id:
         detail += f"，订单号 {order_id}"
+    degraded = bool(parsed.get("_degraded"))
+    if degraded:
+        detail += "（LLM 不可用，已降级为规则分类）"
 
     ui_event["data"]["steps"][0]["status"] = "done"
     ui_event["data"]["steps"][0]["detail"] = detail
@@ -180,7 +185,7 @@ async def classify_intent_node(state: AgentState) -> dict:
     )
     prompt_event = parsed.pop("_prompt_event", None)
 
-    return {
+    result_state = {
         "intent": intent,
         "order_id": order_id,
         "user_id": parsed.get("user_id", "unknown"),
@@ -190,6 +195,9 @@ async def classify_intent_node(state: AgentState) -> dict:
         "ui_events": [ui_event],
         "prompt_events": [prompt_event] if prompt_event else [],
     }
+    if degraded:
+        result_state["llm_degraded"] = True
+    return result_state
 
 
 async def _llm_classify(

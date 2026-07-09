@@ -28,7 +28,11 @@ from app.db.models import (
 )
 from app.db.tenant_context import current_tenant_id, tenant_scope
 from app.commercial.operations import record_usage
+from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.erp.evidence import append_evidence
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,9 @@ async def execute_refund_finance_saga(
                 await _finish_saga(
                     saga_id, tenant_id, ErpSagaStatus.MANUAL_REVIEW, result, str(exc)
                 )
+                await _escalate_saga_to_hitl(
+                    saga_id, tenant_id, command, context, result, str(exc)
+                )
                 return result
 
     preflight_decision = _validate_financial_preflight(command, preflight_results)
@@ -181,6 +188,9 @@ async def execute_refund_finance_saga(
         result["status"] = "MANUAL_REVIEW"
         await _finish_saga(
             saga_id, tenant_id, ErpSagaStatus.MANUAL_REVIEW, result, error
+        )
+        await _escalate_saga_to_hitl(
+            saga_id, tenant_id, command, context, result, error
         )
         return result
 
@@ -258,6 +268,11 @@ async def execute_refund_finance_saga(
             final_status,
             result,
         )
+        # 补偿失败进 MANUAL_REVIEW 时同样登记 HITL（补偿成功的 FAILED 不需人工）
+        if final_status is ErpSagaStatus.MANUAL_REVIEW:
+            await _escalate_saga_to_hitl(
+                saga_id, tenant_id, command, context, result, clear_result.error
+            )
         return result
 
     clearing_connector_result = dict(clear_result.data or {})
@@ -604,6 +619,59 @@ async def _finish_compensated_saga(
             saga.updated_at = _utcnow()
             saga.version += 1
             await session.commit()
+
+
+async def _escalate_saga_to_hitl(
+    saga_id: str,
+    tenant_id: str,
+    command: "RefundFinanceCommand",
+    context: ToolExecutionContext,
+    result: dict[str, Any],
+    error: str | None,
+) -> None:
+    """F3（agent×数据结合层）：Saga 进入 MANUAL_REVIEW 时，在 agent 侧的 HITL
+    收件箱建一条审批任务，复用现成的 approval_tasks 队列 + SLA 升级 + 审批中心，
+    而不是只落一个 saga 状态字段让运营靠翻 dashboard 偶然发现。
+
+    幂等：task_key 绑定 saga_id，ensure_approval_task 的 (tenant,task_key) 唯一约束
+    保证同一 saga 重放不会重复建单。失败不回抛——收件箱登记不应阻断 saga 收尾。"""
+    try:
+        from app.agent.approval_tasks import ensure_approval_task
+        from app.db.database import AsyncSessionLocal as _SessionLocal
+
+        thread_id = str(getattr(context, "thread_id", "") or f"saga:{saga_id}")
+        await ensure_approval_task(
+            task_key=f"erp_saga_manual_review:{saga_id}",
+            request_id=command.refund_request_id,
+            scenario_id="refund_finance",
+            approval_type="erp_saga_manual_review",
+            stage_id="erp_manual_review",
+            stage_name="ERP 财务退款人工介入",
+            requester_id=str(getattr(context, "user_id", "system") or "system"),
+            requester_role=str(getattr(context, "requested_by_role", "AGENT") or "AGENT"),
+            assigned_roles=["FINANCE", "MANAGER"],
+            thread_id=thread_id,
+            business_payload={
+                "sagaId": saga_id,
+                "orderId": command.order_id,
+                "refundRequestId": command.refund_request_id,
+                "amount": str(command.amount),
+                "currency": command.currency,
+                "connectorId": command.connector_id,
+                "sagaStatus": result.get("status") or "MANUAL_REVIEW",
+                "failedStep": result.get("failed_step") or result.get("failedStep"),
+                "error": (error or "")[:500],
+                "compensation": result.get("compensation"),
+                "traceId": getattr(context, "trace_id", None),
+            },
+            sla_minutes=int(getattr(get_settings(), "erp_manual_review_sla_minutes", 120)),
+            priority="high",
+            tenant_id=tenant_id,
+            session_factory=_SessionLocal,
+        )
+        logger.info("saga_escalated_to_hitl", saga_id=saga_id, tenant_id=tenant_id)
+    except Exception as exc:
+        logger.warning("saga_hitl_escalation_failed", saga_id=saga_id, error=str(exc))
 
 
 async def _finish_saga(

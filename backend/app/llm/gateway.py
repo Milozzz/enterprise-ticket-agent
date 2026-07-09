@@ -51,6 +51,12 @@ class LLMProvidersExhausted(RuntimeError):
     pass
 
 
+class LLMTenantBudgetExceeded(RuntimeError):
+    """B8: 租户当日 token 用量超出配额，本次调用被拒绝（下游节点会走规则降级）。"""
+
+    pass
+
+
 DEFAULT_PRICE_CATALOG = {
     # Configurable estimates in USD per one million tokens. Keep production
     # prices in LLM_PRICE_CATALOG_JSON because providers can change pricing.
@@ -115,6 +121,55 @@ class LLMGateway:
         self._session_factory = session_factory
         self._routes = self._load_routes()
         self._prices = self._load_prices()
+        # B8: 每租户当日用量缓存 {tenant_id: (checked_at_monotonic, used_tokens)}，
+        # 避免每次 LLM 调用都打一次 SUM 查询。
+        self._budget_cache: dict[str, tuple[float, int]] = {}
+
+    async def _tenant_tokens_used_today(self, tenant_id: str) -> int:
+        cached = self._budget_cache.get(tenant_id)
+        if cached and (time.monotonic() - cached[0]) < 60:
+            return cached[1]
+        from datetime import datetime, timezone
+
+        from sqlalchemy import func, select
+
+        day_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+        )
+        async with self._session_factory() as session:
+            used = await session.scalar(
+                select(func.coalesce(func.sum(LLMUsageRecord.total_tokens), 0)).where(
+                    LLMUsageRecord.tenant_id == tenant_id,
+                    LLMUsageRecord.created_at >= day_start,
+                )
+            )
+        used_int = int(used or 0)
+        self._budget_cache[tenant_id] = (time.monotonic(), used_int)
+        return used_int
+
+    async def _enforce_tenant_budget(self, node_name: str, context: LLMCallContext | None) -> None:
+        """B8: 每租户日 token 预算硬闸门。budget<=0 时关闭（默认关闭）。"""
+        budget = int(getattr(settings, "llm_tenant_daily_token_budget", 0) or 0)
+        if budget <= 0:
+            return
+        tenant_id = (context.tenant_id if context else None) or settings.default_tenant_id
+        try:
+            used = await self._tenant_tokens_used_today(tenant_id)
+        except Exception as exc:  # 预算查询失败不阻断业务（fail-open，仅记录）
+            logger.warning("llm_budget_check_failed", tenant_id=tenant_id, error=str(exc))
+            return
+        if used >= budget:
+            logger.warning(
+                "llm_tenant_budget_exceeded",
+                tenant_id=tenant_id,
+                node=node_name,
+                used_tokens=used,
+                budget_tokens=budget,
+            )
+            raise LLMTenantBudgetExceeded(
+                f"Tenant {tenant_id} exceeded daily LLM token budget "
+                f"({used}/{budget}); call to {node_name} rejected"
+            )
 
     def runnable(
         self,
@@ -159,6 +214,10 @@ class LLMGateway:
         candidates = self.candidates_for(node_name)
         if not candidates:
             raise LLMProvidersExhausted(f"No configured LLM provider is available for {node_name}")
+
+        # B8: 预算闸门在任何 provider 调用之前执行；超额直接拒绝，
+        # 各节点已有的异常降级路径（规则 fallback + degraded 标注）自然接管。
+        await self._enforce_tenant_budget(node_name, context)
 
         errors: list[str] = []
         for fallback_index, candidate in enumerate(candidates):

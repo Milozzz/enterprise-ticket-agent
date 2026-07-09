@@ -164,6 +164,7 @@ async def answer_policy_node(state: AgentState) -> dict:
     )
 
     # ── Step 2：LLM 流式生成回复（astream 逐 token 推送，chat.py 的 on_chat_model_stream 处理）─
+    llm_degraded = False
     try:
         llm = _get_llm(context, prompt)
         system_prompt = prompt.template.format(policy_context=policy_context)
@@ -185,10 +186,11 @@ async def answer_policy_node(state: AgentState) -> dict:
         ui_generate["data"]["steps"][0]["detail"] = "回答生成完成"
     except Exception as e:
         logger.error("policy_llm_error", error=str(e))
-        # LLM 失败时直接返回检索到的政策原文
+        # LLM 失败时直接返回检索到的政策原文（B3：显式标注降级）
         reply = f"为您找到以下相关政策：\n\n{policy_context}"
+        llm_degraded = True
         ui_generate["data"]["steps"][0]["status"] = "done"
-        ui_generate["data"]["steps"][0]["detail"] = "直接返回政策原文"
+        ui_generate["data"]["steps"][0]["detail"] = "LLM 暂不可用，直接返回政策原文（降级）"
 
     reply = _append_citations(str(reply), citations)
 
@@ -222,6 +224,7 @@ async def answer_policy_node(state: AgentState) -> dict:
     return {
         "current_step": "answer_policy_done",
         "is_completed": True,
+        "llm_degraded": llm_degraded,
         "reply_text": reply,
         "policy_results": [
             {

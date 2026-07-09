@@ -477,3 +477,79 @@ async def get_erp_metrics(days: int = 7):
             "operations": [],
             "slo": {"met": False, "error": str(e)},
         }
+
+
+@router.get("/agent-slo")
+async def get_agent_slo(hours: int = 24):
+    """A5: Agent 侧质量 SLO——路由分布/HITL/节点错误率/LLM 链路健康。
+
+    与 /erp-business-metrics 的 ERP SLO 对齐，让 agent 的质量同样可度量。
+    """
+    from app.agent.agent_slo import compute_agent_slo
+
+    try:
+        async with AsyncSessionLocal() as session:
+            return await compute_agent_slo(session, hours=max(1, min(hours, 24 * 30)))
+    except Exception as e:
+        logger.error("agent_slo_error", error=str(e))
+        return {"window_hours": hours, "error": str(e)}
+
+
+@router.get("/chain-health")
+async def get_chain_health(hours: int = 24):
+    """F5（agent×数据结合层）：一个响应里同时给出 agent 侧 SLO 与 ERP 业务指标，
+    并用共享 trace 抽样把两层缝合起来——让"用户请求 → 财务落地"这条完整链路
+    的健康度可以在一个视图里看，而不是 agent 一个 dashboard、ERP 另一个。"""
+    from app.agent.agent_slo import compute_agent_slo
+    from sqlalchemy import func, select
+    from app.db.models import AuditLog
+
+    window = max(1, min(hours, 24 * 30))
+    result: dict = {"window_hours": window}
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result["agent"] = await compute_agent_slo(session, hours=window)
+    except Exception as e:
+        logger.error("chain_health_agent_error", error=str(e))
+        result["agent"] = {"error": str(e)}
+
+    try:
+        result["erp"] = await get_erp_business_metrics(days=max(1, window // 24 or 1))
+    except Exception as e:
+        logger.error("chain_health_erp_error", error=str(e))
+        result["erp"] = {"error": str(e)}
+
+    # 缝合指标：F2 让 ERP 连接器审计与 agent 主链路共享 trace_id。这里统计
+    # 有多少 ERP 连接器调用能被 join 回 agent 发起的 trace（非 erp: 前缀的
+    # thread_id 即来自 agent），用作"两层是否真正贯穿"的可观测证据。
+    try:
+        from datetime import datetime, timedelta
+
+        since = datetime.utcnow() - timedelta(hours=window)
+        async with AsyncSessionLocal() as session:
+            total_erp = await session.scalar(
+                select(func.count(AuditLog.id)).where(
+                    AuditLog.created_at >= since,
+                    AuditLog.node_name == "erp_connector",
+                )
+            )
+            joinable_erp = await session.scalar(
+                select(func.count(AuditLog.id)).where(
+                    AuditLog.created_at >= since,
+                    AuditLog.node_name == "erp_connector",
+                    ~AuditLog.thread_id.like("erp:%"),
+                )
+            )
+        total_i = int(total_erp or 0)
+        joinable_i = int(joinable_erp or 0)
+        result["linkage"] = {
+            "erp_connector_calls": total_i,
+            "agent_joinable_calls": joinable_i,
+            "trace_join_rate": round(joinable_i / total_i, 4) if total_i else 0.0,
+        }
+    except Exception as e:
+        logger.error("chain_health_linkage_error", error=str(e))
+        result["linkage"] = {"error": str(e)}
+
+    return result

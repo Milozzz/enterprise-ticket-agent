@@ -116,6 +116,44 @@ class Settings(BaseSettings):
     llm_node_routes_json: str = ""
     # Prices are configurable estimates in USD per one million tokens.
     llm_price_catalog_json: str = ""
+    # B8: 每租户每日 LLM token 预算硬上限；<=0 表示关闭（默认关闭）。
+    # 超额时 gateway 拒绝调用，节点走规则降级路径并标注 degraded。
+    llm_tenant_daily_token_budget: int = 0
+    # ── A2: 企业 SSO（OIDC 外部 IdP）────────────────────────────────────
+    # 启用后 RS256/ES256 token 走 IdP JWKS 验证；本地 HS256 dev token 仍然可用。
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""        # 缺省从 issuer 的 openid-configuration 自动发现
+    oidc_role_claim: str = "roles"
+    oidc_tenant_claim: str = "tenant_id"
+    oidc_default_role: str = "USER"
+    # ── A3: Supervisor 语义路由 ─────────────────────────────────────────
+    # 关键词置信度低于 route 阈值时调用 LLM 结构化路由；仍低于 clarify 阈值则主动澄清。
+    supervisor_llm_routing_enabled: bool = False
+    supervisor_route_confidence_threshold: float = 0.55
+    supervisor_clarify_confidence_threshold: float = 0.45
+    # A3 完整形态：置信度过低时中断对话向用户澄清（一轮），用户下一条消息即回答
+    supervisor_clarification_enabled: bool = False
+    # ── A4: 工具自主规划层（plan-execute on tool_gateway）───────────────
+    # 默认关闭；开启后声明了 planner_enabled 的场景由 LLM 规划工具序列，
+    # 每步仍经 tool_gateway 治理（授权/校验/熔断/审计）。
+    agent_planner_enabled: bool = False
+    agent_planner_max_steps: int = 5
+    # A4 完整形态：react=步间重规划（观察-决策-执行循环，失败可补救）；
+    # plan_execute=一次规划顺序执行（更保守）。连续失败达到上限即终止。
+    agent_planner_mode: str = "react"
+    agent_planner_max_consecutive_failures: int = 2
+    # F4：允许规划器调用 ERP 只读工具（erp_get_order/erp_query_doctype），
+    # 用于多步只读诊断（"这笔退款卡在哪"）。只读、走连接器治理路径，默认关闭。
+    planner_erp_readonly_enabled: bool = False
+    # ── A7: 场景 slot 的 LLM 结构化提取（正则保留为降级路径）────────────
+    slot_llm_extraction_enabled: bool = False
+    # A7 完整形态：必填 slot 缺失时中断对话追问（一轮），仍缺失按默认值继续
+    slot_clarification_enabled: bool = False
+    # H2（长对话优化）：answer 节点单次 LLM 调用携带的最近消息条数上限。
+    # 完整历史仍在 checkpointer，只限制进 prompt 的窗口。
+    chat_llm_history_window: int = 20
     # Prompt versions and stable/canary rollout rules, JSON encoded.
     prompt_versions_json: str = ""
     prompt_rollouts_json: str = ""
@@ -178,6 +216,8 @@ class Settings(BaseSettings):
     # Optional JSON object mapping logical operations to tenant-specific OData
     # paths. This keeps S/4HANA public/private cloud differences out of agents.
     sap_operation_paths_json: str = ""
+    # F3：ERP Saga 进入 MANUAL_REVIEW 时在 HITL 收件箱建单的 SLA（分钟）
+    erp_manual_review_sla_minutes: int = 120
 
     # Public URL advertised by MCP/A2A discovery documents.
     agent_public_url: str = "http://localhost:8000"

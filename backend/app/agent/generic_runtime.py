@@ -12,9 +12,11 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 
+from app.agent.planner import ERP_READONLY_TOOLS, plan_and_execute
 from app.agent.scenario_registry import ScenarioConfig, get_default_registry
 from app.agent.state import AgentState
 from app.agent.tool_gateway import execute_tool, gateway_context_from_state
+from app.core.config import get_settings
 from app.agent.tools.enterprise_tools import create_permission_request, create_reimbursement_request
 from app.agent.ui_events import build_business_request_card, build_generic_approval_panel
 from app.agent.utils import get_state_val
@@ -70,7 +72,18 @@ async def run_configured_scenario(
     message = latest_human_message(state)
     requester_id = str(get_state_val(state, "user_id", "anonymous") or "anonymous")
     thread_id = get_state_val(state, "thread_id")
-    slots = extract_slots(message, runtime.get("slot_extraction", {}))
+    slot_config = dict(runtime.get("slot_extraction") or {})
+    slots = await extract_slots_smart(message, slot_config, state)
+
+    # A7 完整形态：必填 slot 缺失时中断对话向用户追问（interrupt 语义与审批
+    # 一致），拿到补充信息后合并重提取。只追问一轮，仍缺失则按默认值继续。
+    slots, message = await fill_missing_required_slots(
+        message=message,
+        slots=slots,
+        slot_config=slot_config,
+        state=state,
+        scenario=scenario,
+    )
 
     base_context = {
         "input": {"message": message},
@@ -95,8 +108,49 @@ async def run_configured_scenario(
             "current_step": f"{scenario.id}_policy_denied",
         }
 
-    tool_configs = list(runtime.get("tools") or [runtime.get("tool", {})])
+    # A4：声明了 planner.enabled 的场景（且全局 AGENT_PLANNER_ENABLED=1）
+    # 由 LLM 在场景工具白名单内规划执行序列；每步仍经 tool_gateway 全量治理。
+    # 规划失败/计划无效/LLM 不可用 → 无损降级回下方静态配置的工具序列。
     tool_results = []
+    planner_config = dict(runtime.get("planner") or {})
+    if planner_config.get("enabled") and get_settings().agent_planner_enabled:
+        allowed = set(scenario.tools) or set(TOOL_HANDLERS)
+        # F4：全局开启 ERP 只读扩面时，把 ERP 读工具并入规划器可用集合。
+        # 这些工具走 async 连接器治理路径，无需本地 handler。
+        if get_settings().planner_erp_readonly_enabled:
+            allowed = allowed | ERP_READONLY_TOOLS
+        plan_execution = await plan_and_execute(
+            state,
+            scenario_id=scenario.id,
+            goal=message,
+            slots=slots,
+            allowed_tools=allowed,
+            handlers=TOOL_HANDLERS,
+            dry_run=dry_run,
+        )
+        if plan_execution.used_planner:
+            tool_results = list(plan_execution.results)
+            if not plan_execution.success:
+                return {
+                    "intent": scenario.id,
+                    "scenario_id": scenario.id,
+                    "error_message": plan_execution.aborted_reason
+                    or f"{scenario.name} planned execution failed.",
+                    "tool_gateway_events": [item.audit_event for item in tool_results],
+                    "policy_events": [
+                        decision.to_audit_event() for decision in policy_decisions
+                    ],
+                    "current_step": f"{scenario.id}_plan_failed",
+                }
+        else:
+            logger.info(
+                "planner_fallback_static_tools",
+                scenario=scenario.id,
+                degraded=plan_execution.degraded,
+                reason=plan_execution.aborted_reason,
+            )
+
+    tool_configs = list(runtime.get("tools") or [runtime.get("tool", {})]) if not tool_results else []
     for tool_config in (config for config in tool_configs if config):
         execution_context = {
             **base_context,
@@ -123,8 +177,14 @@ async def run_configured_scenario(
 
     if not tool_results:
         raise ValueError(f"Scenario '{scenario.id}' does not define runtime tools.")
-    request_data = dict(tool_results[0].data or {})
-    request_data["toolResults"] = [dict(item.data or {}) for item in tool_results]
+    # ReAct 模式允许"失败→补救"，首个结果可能是失败步；业务数据取首个成功结果
+    primary_result = next(
+        (item for item in tool_results if item.success), tool_results[0]
+    )
+    request_data = dict(primary_result.data or {})
+    request_data["toolResults"] = [
+        dict(item.data or {}) for item in tool_results if item.success
+    ]
     request_data["requestId"] = request_data.get("requestId") or f"DRY_RUN_{scenario.id.upper()}"
     request_data["approvalRequired"] = policy_decision.requires_human_review
     request_data["policyDecision"] = policy_decision.to_audit_event()
@@ -170,6 +230,225 @@ async def run_configured_scenario(
 def extract_slots(message: str, config: Mapping[str, Any]) -> dict[str, Any]:
     fields = dict(config.get("fields") or {})
     return {field_name: extract_field(message, field_config) for field_name, field_config in fields.items()}
+
+
+# ── A7: LLM function-calling slot 提取（正则保留为逐字段降级路径）──────────
+
+
+def _slot_json_schema(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """把场景 slot 配置编译成 JSON Schema，交给 LLM 结构化输出。"""
+    properties: dict[str, Any] = {}
+    for name, field_config in fields.items():
+        strategy = str(field_config.get("type") or "message_excerpt")
+        if strategy == "amount":
+            properties[name] = {"type": "number", "description": "金额，数字"}
+        elif strategy == "keyword_enum":
+            values = [
+                option.get("value")
+                for option in field_config.get("options", [])
+                if option.get("value") is not None
+            ]
+            properties[name] = {"type": "string", "enum": [str(v) for v in values]}
+        elif strategy == "keyword_map":
+            values = [
+                pattern.get("value")
+                for pattern in field_config.get("patterns", [])
+                if pattern.get("value") is not None
+            ]
+            prop: dict[str, Any] = {"type": "string"}
+            if values:
+                prop["enum"] = [str(v) for v in values]
+            properties[name] = prop
+        else:
+            properties[name] = {"type": "string"}
+    return {
+        "title": "ScenarioSlots",
+        "type": "object",
+        "properties": properties,
+    }
+
+
+def _coerce_slot_value(value: Any, field_config: Mapping[str, Any]) -> Any:
+    """把 LLM 输出的值收敛到配置约束内；不合法返回 None（回落正则值）。"""
+    if value in (None, ""):
+        return None
+    strategy = str(field_config.get("type") or "message_excerpt")
+    if strategy == "amount":
+        try:
+            amount = Decimal(str(value)).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            return None
+        return amount if amount >= 0 else None
+    if strategy == "keyword_enum":
+        allowed = {
+            str(option.get("value"))
+            for option in field_config.get("options", [])
+            if option.get("value") is not None
+        }
+        return str(value) if str(value) in allowed else None
+    if strategy == "keyword_map":
+        allowed = {
+            str(pattern.get("value"))
+            for pattern in field_config.get("patterns", [])
+            if pattern.get("value") is not None
+        }
+        if allowed and str(value) not in allowed:
+            return None
+        return str(value)
+    if strategy == "message_excerpt":
+        max_length = int(field_config.get("max_length") or 500)
+        return str(value)[:max_length]
+    return value
+
+
+async def _llm_extract_slots(
+    message: str,
+    fields: Mapping[str, Any],
+    state: AgentState,
+) -> dict[str, Any] | None:
+    """LLM 结构化 slot 提取；任何失败返回 None（调用方整体回落正则）。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from app.agent.dependencies import get_agent_dependencies
+    from app.llm.gateway import LLMCallContext
+
+    try:
+        response = await get_agent_dependencies().llm.runnable(
+            "slot_extraction",
+            context=LLMCallContext(
+                thread_id=str(get_state_val(state, "thread_id", "unknown")),
+                trace_id=str(get_state_val(state, "trace_id", "") or "") or None,
+                tenant_id=str(get_state_val(state, "tenant_id", "") or "") or None,
+            ),
+            schema=_slot_json_schema(fields),
+            temperature=0.0,
+            timeout_seconds=6.0,
+        ).ainvoke([
+            SystemMessage(
+                content=(
+                    "从用户消息中提取业务字段。不确定的字段返回空字符串，"
+                    "不要编造。金额只取数字。"
+                )
+            ),
+            HumanMessage(content=message),
+        ])
+        if isinstance(response, dict):
+            return response
+        dumped = getattr(response, "model_dump", None)
+        return dumped() if callable(dumped) else None
+    except Exception as exc:
+        logger.warning("llm_slot_extraction_failed_fallback_regex", error=str(exc))
+        return None
+
+
+def _slot_value_missing(value: Any, field_config: Mapping[str, Any]) -> bool:
+    """判断一个 slot 值是否算"缺失"（用于必填校验）。"""
+    if value in (None, ""):
+        return True
+    strategy = str(field_config.get("type") or "message_excerpt")
+    if strategy == "amount":
+        try:
+            return Decimal(str(value)) <= 0
+        except (InvalidOperation, ValueError):
+            return True
+    return False
+
+
+async def fill_missing_required_slots(
+    *,
+    message: str,
+    slots: dict[str, Any],
+    slot_config: Mapping[str, Any],
+    state: AgentState,
+    scenario: ScenarioConfig,
+) -> tuple[dict[str, Any], str]:
+    """A7 完整形态：必填 slot 缺失 → interrupt 追问 → 合并重提取（仅一轮）。
+
+    返回 (slots, message)。message 可能被追加了用户补充内容，供后续
+    message_excerpt 类字段与审计使用。未启用开关或无缺失时原样返回。
+    """
+    from langgraph.types import interrupt
+
+    if not get_settings().slot_clarification_enabled:
+        return slots, message
+    fields = dict(slot_config.get("fields") or {})
+    missing = [
+        name
+        for name, field_config in fields.items()
+        if field_config.get("required")
+        and _slot_value_missing(slots.get(name), field_config)
+    ]
+    if not missing:
+        return slots, message
+
+    labels = [
+        str(fields[name].get("label") or fields[name].get("description") or name)
+        for name in missing
+    ]
+    resume_value = interrupt(
+        {
+            "kind": "slot_filling",
+            "question": f"办理「{scenario.name}」还需要补充：{'、'.join(labels)}",
+            "missing_fields": missing,
+            "missing_labels": labels,
+            "scenario_id": scenario.id,
+            "thread_id": str(get_state_val(state, "thread_id", "") or ""),
+        }
+    )
+    if isinstance(resume_value, Mapping):
+        answer = str(resume_value.get("answer") or "")
+    else:
+        answer = str(resume_value or "")
+    if not answer:
+        return slots, message
+
+    combined = f"{message}\n（用户补充：{answer}）"
+    refreshed = await extract_slots_smart(combined, slot_config, state)
+    merged = dict(slots)
+    for name, field_config in fields.items():
+        if _slot_value_missing(merged.get(name), field_config) and not _slot_value_missing(
+            refreshed.get(name), field_config
+        ):
+            merged[name] = refreshed[name]
+    still_missing = [
+        name
+        for name in missing
+        if _slot_value_missing(merged.get(name), fields[name])
+    ]
+    if still_missing:
+        logger.info(
+            "slot_filling_partial",
+            scenario=scenario.id,
+            still_missing=still_missing,
+        )
+    return merged, combined
+
+
+async def extract_slots_smart(
+    message: str,
+    config: Mapping[str, Any],
+    state: AgentState,
+) -> dict[str, Any]:
+    """A7 入口：LLM 提取（开关开启时）→ 逐字段校验收敛 → 正则兜底。
+
+    合并规则：LLM 值先经 _coerce_slot_value 收敛到配置约束（enum 白名单、
+    金额非负），不合法或缺失的字段用正则结果补位——保证启用 LLM 后
+    最坏情况也不会差于纯正则。
+    """
+    regex_slots = extract_slots(message, config)
+    fields = dict(config.get("fields") or {})
+    if not fields or not get_settings().slot_llm_extraction_enabled:
+        return regex_slots
+
+    llm_slots = await _llm_extract_slots(message, fields, state)
+    if llm_slots is None:
+        return regex_slots
+
+    merged: dict[str, Any] = {}
+    for name, field_config in fields.items():
+        coerced = _coerce_slot_value(llm_slots.get(name), field_config)
+        merged[name] = coerced if coerced is not None else regex_slots.get(name)
+    return merged
 
 
 def extract_field(message: str, field_config: Mapping[str, Any]) -> Any:

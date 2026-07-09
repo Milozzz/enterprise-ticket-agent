@@ -114,6 +114,20 @@ async def answer_node(state: AgentState) -> dict:
     # 取 state.messages（已包含历史 + 工具结果，由 add_messages 累积）
     messages = list(state.get("messages", []))
 
+    # H2（长对话优化）：LLM 上下文窗口——只带最近 N 条进 prompt，防止长
+    # 对话把每次调用推到几千 token。截断时保证不以 ToolMessage 开头
+    # （孤儿工具结果会让部分 provider 报错）。完整历史仍在 checkpointer，
+    # 只影响本次 LLM 看到的窗口。
+    window = max(4, int(getattr(settings, "chat_llm_history_window", 20)))
+    if len(messages) > window:
+        trimmed = messages[-window:]
+        while trimmed and getattr(trimmed[0], "type", "") == "tool":
+            trimmed = trimmed[1:]
+        logger.info(
+            "answer_context_trimmed", total=len(messages), window=len(trimmed)
+        )
+        messages = trimmed
+
     # 首次进入：在消息前插入 system prompt
     has_system = any(getattr(m, "type", "") == "system" for m in messages)
     if not has_system:
@@ -125,11 +139,13 @@ async def answer_node(state: AgentState) -> dict:
     except Exception as e:
         logger.warning("answer_node_llm_error", error=str(e))
         ui_thinking["data"]["steps"][0]["status"] = "done"
-        ui_thinking["data"]["steps"][0]["detail"] = "已生成回复"
+        # B3：降级回复必须对用户与审计均可见，不能伪装成正常生成
+        ui_thinking["data"]["steps"][0]["detail"] = "LLM 暂不可用，已返回引导回复（降级）"
         return {
             "current_step": "answer_done",
             "is_completed": True,
             "reply_text": _fallback_reply(),
+            "llm_degraded": True,
             "ui_events": [ui_thinking],
             "prompt_events": [prompt.to_audit_event()],
         }

@@ -197,9 +197,23 @@ def build_graph(checkpointer=None):
     return builder.compile(**compile_kwargs)
 
 
+# 当前 serving graph 背后的 checkpointer 类型：memory | redis | postgres。
+# HITL 依赖 interrupt() 状态持久化，MemorySaver 下进程重启会丢失所有待审批流程，
+# 因此生产环境必须在 lifespan 中替换为 postgres（见 main.py 的 fail-fast 校验）。
+_ACTIVE_CHECKPOINTER_KIND = "memory"
+
+
+def active_checkpointer_kind() -> str:
+    return _ACTIVE_CHECKPOINTER_KIND
+
+
 def _build_default_graph():
+    global _ACTIVE_CHECKPOINTER_KIND
     if settings.environment != "development":
+        # 仅为进程启动期的占位 graph；lifespan 会用 AsyncPostgresSaver 替换。
+        # 若替换失败 main.py 会直接抛错拒绝启动，而不是静默用内存版对外服务。
         logger.info("checkpointer_bootstrap_memory", replacement="postgres_lifespan")
+        _ACTIVE_CHECKPOINTER_KIND = "memory"
         return build_graph(checkpointer=MemorySaver())
 
     explicit_redis = os.getenv("REDIS_URL", "")
@@ -209,10 +223,12 @@ def _build_default_graph():
             redis_cp = RedisSaver(redis_url=redis_url)
             redis_cp.setup()
             logger.info("checkpointer_redis_active", url=redis_url[:30] + "...")
+            _ACTIVE_CHECKPOINTER_KIND = "redis"
             return build_graph(checkpointer=redis_cp)
         except Exception as exc:
             logger.warning("redis_checkpointer_failed_fallback_memory", error=str(exc))
     logger.info("checkpointer_memory_active")
+    _ACTIVE_CHECKPOINTER_KIND = "memory"
     return build_graph(checkpointer=MemorySaver())
 
 
@@ -235,6 +251,7 @@ async def open_postgres_graph(db_connection_string: str):
         raise
 
 
-def set_ticket_graph(graph) -> None:
-    global ticket_graph
+def set_ticket_graph(graph, checkpointer_kind: str = "postgres") -> None:
+    global ticket_graph, _ACTIVE_CHECKPOINTER_KIND
     ticket_graph = graph
+    _ACTIVE_CHECKPOINTER_KIND = checkpointer_kind

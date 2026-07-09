@@ -43,6 +43,16 @@ class ERPWriteBlockedError(ERPConnectorError):
 
 
 @dataclass(frozen=True)
+class AgentTraceRef:
+    """F2：把 agent 侧链路标识带进 ERP 连接器审计，实现端到端 trace join。"""
+
+    trace_id: str | None = None
+    thread_id: str | None = None
+    scenario: str | None = None
+    actor_role: str | None = None
+
+
+@dataclass(frozen=True)
 class ConnectorRuntimeConfig:
     connector_id: str
     mode: str = "mock"
@@ -694,7 +704,11 @@ async def execute_connector_envelope(
     principal_token: str | None = None,
     force_write: bool = False,
     tenant_id: str | None = None,
+    agent_trace: "AgentTraceRef | None" = None,
 ) -> ConnectorExecutionResult:
+    """F2（agent×数据结合层）：agent_trace 携带发起该 ERP 调用的 agent 侧
+    thread_id/trace_id，写入连接器审计，使"用户说了什么 → 对 SAP 发了什么请求"
+    可用同一 trace_id 端到端 join。为空时退回旧的 erp:{幂等键} 编号。"""
     resolved_tenant = (
         current_tenant_id() if not tenant_id or tenant_id == "default" else tenant_id
     )
@@ -717,7 +731,7 @@ async def execute_connector_envelope(
         )
     if replay:
         result = _result_from_snapshot(replay, replayed=True)
-        await _persist_connector_audit(envelope, result, tenant_id=resolved_tenant)
+        await _persist_connector_audit(envelope, result, tenant_id=resolved_tenant, agent_trace=agent_trace)
         return result
 
     try:
@@ -742,6 +756,7 @@ async def execute_connector_envelope(
                 error=str(exc),
             ),
             tenant_id=resolved_tenant,
+            agent_trace=agent_trace,
         )
         raise
 
@@ -753,7 +768,7 @@ async def execute_connector_envelope(
             fail_closed=connector.config.mode == "live",
             tenant_id=resolved_tenant,
         )
-    await _persist_connector_audit(envelope, result, tenant_id=resolved_tenant)
+    await _persist_connector_audit(envelope, result, tenant_id=resolved_tenant, agent_trace=agent_trace)
     return result
 
 
@@ -869,6 +884,7 @@ async def _persist_connector_audit(
     result: ConnectorExecutionResult,
     *,
     tenant_id: str,
+    agent_trace: "AgentTraceRef | None" = None,
 ) -> None:
     """Persist compact connector telemetry without secrets or full SAP payloads."""
 
@@ -881,6 +897,9 @@ async def _persist_connector_audit(
             "method": str(envelope.get("method") or "GET").upper(),
             "payload": dict(envelope.get("payload") or {}),
             "idempotency_key": idempotency_key or None,
+            # F2：把发起方 agent 场景/角色也记进审计输入，便于按场景检索 ERP 调用
+            "agent_scenario": agent_trace.scenario if agent_trace else None,
+            "agent_actor_role": agent_trace.actor_role if agent_trace else None,
         }
     )
     output_data = {
@@ -891,15 +910,27 @@ async def _persist_connector_audit(
         "replayed": result.replayed,
         "remote_request_id": result.remote_request_id,
         "error": result.error,
+        # 保留 ERP 侧原始编号，即便 join 到 agent trace 也能回溯连接器请求
+        "connector_request_id": request_id,
     }
+    # F2：优先用 agent 侧 thread/trace 编号，使 ERP 连接器审计与 agent 主链路
+    # 可用同一 trace_id join；无 agent_trace（如后台对账直调）时退回 erp:{幂等键}。
+    audit_thread_id = (
+        (agent_trace.thread_id if agent_trace and agent_trace.thread_id else None)
+        or f"erp:{idempotency_key or request_id}"
+    )
+    audit_trace_id = (
+        (agent_trace.trace_id if agent_trace and agent_trace.trace_id else None)
+        or request_id
+    )
     try:
         with tenant_scope(tenant_id):
             async with AsyncSessionLocal() as session:
                 session.add(
                     AuditLog(
                     tenant_id=tenant_id,
-                    thread_id=f"erp:{idempotency_key or request_id}",
-                    trace_id=request_id,
+                    thread_id=audit_thread_id,
+                    trace_id=audit_trace_id,
                     node_name="erp_connector",
                     event_type=result.operation,
                     input_data=input_data,

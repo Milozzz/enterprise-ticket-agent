@@ -846,11 +846,20 @@ async def execute_erp_connector_tool_async(
 
     async def handler(**values: Any) -> dict[str, Any]:
         envelope = builders[tool_name](values)
+        # F2：把 agent 侧链路标识透传进连接器审计，端到端 trace 可 join
+        from app.erp.runtime import AgentTraceRef
+
         result = await execute_connector_envelope(
             envelope,
             principal_token=context.principal_token,
             force_write=context.allow_live_write,
             tenant_id=context.tenant_id,
+            agent_trace=AgentTraceRef(
+                trace_id=context.trace_id or None,
+                thread_id=context.thread_id or None,
+                scenario=context.scenario,
+                actor_role=context.actor_role,
+            ),
         )
         return result.to_dict()
 

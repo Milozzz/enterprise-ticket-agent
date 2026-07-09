@@ -101,6 +101,8 @@ async def human_review_node(state: AgentState) -> dict:
                 "currency": get_state_val(state, "currency", "CNY"),
                 "riskScore": get_state_val(state, "risk_score", 0),
                 "riskReasons": get_state_val(state, "risk_reasons", []),
+                # G1：判例摘要进收件箱——审批人打开任务即见历史批准率与典型拒绝理由
+                "precedents": get_state_val(state, "risk_precedents") or None,
             },
             sla_minutes=scenario.sla_minutes,
             priority="high" if float(get_state_val(state, "risk_score", 0) or 0) >= 80 else "normal",
@@ -119,6 +121,7 @@ async def human_review_node(state: AgentState) -> dict:
                 "currency": get_state_val(state, "currency", "CNY"),
                 "risk_score": get_state_val(state, "risk_score", 0),
                 "risk_reasons": get_state_val(state, "risk_reasons", []),
+                "precedents": get_state_val(state, "risk_precedents") or None,
                 "allowed_roles": ["MANAGER"],
             }
         )
