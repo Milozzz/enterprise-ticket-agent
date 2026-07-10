@@ -384,6 +384,34 @@ def test_live_sap_connector_blocks_writes_in_read_only_mode():
     asyncio.run(run())
 
 
+def test_live_sap_shadow_mode_never_performs_network_write_even_when_read_only():
+    async def run():
+        connector = SAPODataConnector(
+            ConnectorRuntimeConfig(
+                connector_id="CONN-SAP-SHADOW-SAFE",
+                mode="live",
+                base_url="https://sap.example.test",
+                read_only=True,
+                shadow_writes=True,
+            )
+        )
+        envelope = build_erp_create_credit_memo_request(
+            "ERP-ORD-1",
+            "ERP-REF-1",
+            Decimal("10.00"),
+            connector_id="CONN-SAP-SHADOW-SAFE",
+        )
+
+        result = await connector.execute(envelope)
+
+        assert result.success is True
+        assert result.shadow is True
+        assert result.status_code == 202
+        assert "plannedRequest" in result.data
+
+    asyncio.run(run())
+
+
 def test_refund_finance_saga_posts_credit_memo_clearing_and_outbox(monkeypatch):
     async def run():
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")

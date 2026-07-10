@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any
+
+from sqlalchemy import select
 
 from app.agent.scenario_registry import get_default_registry
 from app.core.policy import allowed_roles_for_action, evaluate_action_policy
+from app.db.models import ApprovalDecision
+from app.db.tenant_context import tenant_scope
 
 
 @dataclass(frozen=True)
@@ -19,6 +24,72 @@ class ApprovalAuthorizationResult:
     stage_name: str | None = None
     policy_action: str = ""
     policy_event: dict[str, Any] | None = None
+
+
+def approval_evidence_id(
+    *,
+    tenant_id: str,
+    scenario_id: str,
+    thread_id: str,
+    stage_id: str,
+) -> str:
+    raw = f"{tenant_id}:{scenario_id}:{thread_id}:{stage_id}"
+    return f"APR-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32].upper()}"
+
+
+async def persist_approval_evidence(
+    *,
+    tenant_id: str,
+    scenario_id: str,
+    approval_type: str,
+    thread_id: str,
+    stage_id: str,
+    action: str,
+    reviewer_id: str,
+    reviewer_role: str,
+    review_roles: list[str],
+    comment: str = "",
+    policy_event: dict[str, Any] | None = None,
+    session_factory,
+) -> str:
+    """Persist a stable approval artifact consumed by high-risk tool calls."""
+
+    evidence_id = approval_evidence_id(
+        tenant_id=tenant_id,
+        scenario_id=scenario_id,
+        thread_id=thread_id,
+        stage_id=stage_id,
+    )
+    normalized_action = str(action).lower()
+    with tenant_scope(tenant_id):
+        async with session_factory() as session:
+            existing = await session.scalar(
+                select(ApprovalDecision).where(
+                    ApprovalDecision.tenant_id == tenant_id,
+                    ApprovalDecision.request_id == evidence_id,
+                )
+            )
+            if existing is None:
+                session.add(
+                    ApprovalDecision(
+                        tenant_id=tenant_id,
+                        request_id=evidence_id,
+                        scenario_id=scenario_id,
+                        approval_type=approval_type,
+                        action=normalized_action,
+                        status="approved" if normalized_action in {"approve", "auto_approve"} else "rejected",
+                        reviewer_id=reviewer_id,
+                        reviewer_role=reviewer_role,
+                        review_roles={"roles": review_roles, "stage_id": stage_id},
+                        comment=comment,
+                        thread_id=thread_id,
+                        policy_event=policy_event,
+                    )
+                )
+                await session.commit()
+            elif existing.action != normalized_action:
+                raise ValueError("Approval evidence already contains a different decision")
+    return evidence_id
 
 
 def approval_action_name(action: str, approval_type: str) -> str:

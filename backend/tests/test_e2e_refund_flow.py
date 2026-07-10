@@ -99,10 +99,9 @@ def _make_summarize_mock() -> MagicMock:
     return llm
 
 
-def _make_order_tool_mock(order_id: str, amount: float) -> MagicMock:
-    """模拟 get_order_detail 工具返回（同步 .invoke()）"""
-    mock = MagicMock()
-    mock.invoke = MagicMock(return_value={
+def _make_order_tool_mock(order_id: str, amount: float) -> AsyncMock:
+    """模拟异步 canonical 订单查询。"""
+    return AsyncMock(return_value={
         "id": order_id,
         "orderId": order_id,
         "totalAmount": amount,
@@ -111,7 +110,6 @@ def _make_order_tool_mock(order_id: str, amount: float) -> MagicMock:
         "userId": str(TEST_USER_ID),
         "shippingAddress": "测试地址",
     })
-    return mock
 
 
 # ── Fixture：共享 ASGI client + 真实 DB ──────────────────────────────────────
@@ -207,7 +205,7 @@ class TestLowRiskAutoRefund:
                    return_value=_make_classifier_mock("refund", TEST_ORDER_ID)), \
              patch("app.agent.nodes.classifier._get_llm_fallback",
                    return_value=_make_classifier_mock("refund", TEST_ORDER_ID)), \
-             patch("app.agent.nodes.order_lookup.get_order_detail",
+             patch("app.agent.nodes.order_lookup._get_order_detail_async",
                    _make_order_tool_mock(TEST_ORDER_ID, TEST_ORDER_AMT_LOW)), \
              patch("app.agent.tools.notification_tools._send_email"), \
              patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
@@ -240,7 +238,7 @@ class TestLowRiskAutoRefund:
 
         with patch("app.agent.nodes.classifier._get_llm_structured",
                    return_value=_make_classifier_mock("refund", TEST_ORDER_ID)), \
-             patch("app.agent.nodes.order_lookup.get_order_detail",
+             patch("app.agent.nodes.order_lookup._get_order_detail_async",
                    _make_order_tool_mock(TEST_ORDER_ID, TEST_ORDER_AMT_LOW)), \
              patch("app.agent.tools.notification_tools._send_email"), \
              patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
@@ -268,7 +266,7 @@ class TestLowRiskAutoRefund:
 
         with patch("app.agent.nodes.classifier._get_llm_structured",
                    return_value=_make_classifier_mock("refund", TEST_ORDER_ID)), \
-             patch("app.agent.nodes.order_lookup.get_order_detail",
+             patch("app.agent.nodes.order_lookup._get_order_detail_async",
                    _make_order_tool_mock(TEST_ORDER_ID, TEST_ORDER_AMT_LOW)), \
              patch("app.agent.tools.notification_tools._send_email"), \
              patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
@@ -301,7 +299,7 @@ class TestHighRiskHumanApproval:
 
         with patch("app.agent.nodes.classifier._get_llm_structured",
                    return_value=_make_classifier_mock("refund", TEST_ORDER_ID)), \
-             patch("app.agent.nodes.order_lookup.get_order_detail",
+             patch("app.agent.nodes.order_lookup._get_order_detail_async",
                    _make_order_tool_mock(TEST_ORDER_ID, TEST_ORDER_AMT_HIGH)), \
              patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \
              patch("app.api.routes.chat.effective_simulate_database_down", return_value=False):
@@ -325,20 +323,31 @@ class TestHighRiskHumanApproval:
     async def test_resume_approve_completes_flow(self, client_and_db):
         """MANAGER 批准后，/resume 应返回 200 SSE 流，最终以 done 结束"""
         client, _ = client_and_db
+        from app.core.auth import get_current_user
+        from app.main import app
 
-        with patch("app.agent.tools.notification_tools._send_email"), \
-             patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
-                   return_value="本次退款已完成。"), \
-             patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \
-             patch("app.api.routes.chat.effective_simulate_database_down", return_value=False):
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "manager_001",
+            "role": "MANAGER",
+            "tenant_id": "TENANT-DEMO-COMMERCE",
+        }
 
-            response = await client.post("/api/agent/resume", json={
-                "thread_id": THREAD_HIGH,
-                "action": "approve",
-                "reviewer_role": "MANAGER",
-                "reviewer_id": "manager_001",
-                "comment": "金额合理，批准",
-            })
+        try:
+            with patch("app.agent.tools.notification_tools._send_email"), \
+                 patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
+                       return_value="本次退款已完成。"), \
+                 patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \
+                 patch("app.api.routes.chat.effective_simulate_database_down", return_value=False):
+
+                response = await client.post("/api/agent/resume", json={
+                    "thread_id": THREAD_HIGH,
+                    "action": "approve",
+                    "reviewer_role": "MANAGER",
+                    "reviewer_id": "manager_001",
+                    "comment": "金额合理，批准",
+                })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
 
         assert response.status_code == 200
         events = _parse_sse(response.text)
@@ -373,11 +382,13 @@ class TestHighRiskRejection:
     async def test_reject_flow_ends_with_done(self, client_and_db):
         """拒绝路径同样应以 done 事件结束"""
         client, _ = client_and_db
+        from app.core.auth import get_current_user
+        from app.main import app
 
         # Step 1: 提交高风险退款，触发 interrupt
         with patch("app.agent.nodes.classifier._get_llm_structured",
                    return_value=_make_classifier_mock("refund", TEST_ORDER_ID)), \
-             patch("app.agent.nodes.order_lookup.get_order_detail",
+             patch("app.agent.nodes.order_lookup._get_order_detail_async",
                    _make_order_tool_mock(TEST_ORDER_ID, TEST_ORDER_AMT_HIGH)), \
              patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \
              patch("app.api.routes.chat.effective_simulate_database_down", return_value=False):
@@ -392,18 +403,26 @@ class TestHighRiskRejection:
         assert r1.status_code == 200
 
         # Step 2: MANAGER 拒绝
-        with patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
-                   return_value="退款申请被拒绝。"), \
-             patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \
-             patch("app.api.routes.chat.effective_simulate_database_down", return_value=False):
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "manager_001",
+            "role": "MANAGER",
+            "tenant_id": "TENANT-DEMO-COMMERCE",
+        }
+        try:
+            with patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
+                       return_value="退款申请被拒绝。"), \
+                 patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \
+                 patch("app.api.routes.chat.effective_simulate_database_down", return_value=False):
 
-            r2 = await client.post("/api/agent/resume", json={
-                "thread_id": THREAD_REJ,
-                "action": "reject",
-                "reviewer_role": "MANAGER",
-                "reviewer_id": "manager_001",
-                "comment": "风险过高，拒绝",
-            })
+                r2 = await client.post("/api/agent/resume", json={
+                    "thread_id": THREAD_REJ,
+                    "action": "reject",
+                    "reviewer_role": "MANAGER",
+                    "reviewer_id": "manager_001",
+                    "comment": "风险过高，拒绝",
+                })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
 
         assert r2.status_code == 200
         events = _parse_sse(r2.text)
@@ -421,12 +440,11 @@ class TestEdgeCases:
         """订单查不到时流程应优雅结束（不崩溃），产生 done 事件"""
         client, _ = client_and_db
 
-        not_found_mock = MagicMock()
-        not_found_mock.invoke = MagicMock(return_value={"error": "订单不存在"})
+        not_found_mock = AsyncMock(return_value={"error": "订单不存在"})
 
         with patch("app.agent.nodes.classifier._get_llm_structured",
                    return_value=_make_classifier_mock("refund", "NONEXISTENT-ORDER")), \
-             patch("app.agent.nodes.order_lookup.get_order_detail", not_found_mock), \
+             patch("app.agent.nodes.order_lookup._get_order_detail_async", not_found_mock), \
              patch("app.agent.nodes.summarize._call_llm", new_callable=AsyncMock,
                    return_value="订单未找到，流程终止。"), \
              patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock), \

@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime
 
 from app.agent.precedent import apply_precedents_to_risk, load_refund_precedents
+from app.agent.approval_service import persist_approval_evidence
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.agent.tool_gateway import execute_tool, gateway_context_from_state
@@ -412,10 +413,28 @@ async def check_risk_node(state: AgentState) -> dict:
             logger.info("upsert_ticket_result", db_ticket_id=db_ticket_id, order_id=order_id)
         except Exception as ticket_err:
             logger.error("upsert_ticket_failed", error=str(ticket_err), order_id=order_id)
-            import traceback
+            raise RuntimeError("退款工单未能持久化，已阻止后续财务操作") from ticket_err
+        if not db_ticket_id:
+            raise RuntimeError("退款工单未能形成有效记录，已阻止后续财务操作")
 
-            traceback.print_exc()
-            db_ticket_id = 0
+        approval_id = None
+        if not requires_human:
+            # Auto approval is still explicit evidence: a deterministic policy
+            # decision is persisted before any ERP write can cross the gateway.
+            approval_id = await persist_approval_evidence(
+                tenant_id=tenant_id,
+                scenario_id="refund",
+                approval_type="refund_policy_auto_approval",
+                thread_id=thread_id,
+                stage_id="policy_auto_approval",
+                action="auto_approve",
+                reviewer_id="policy-engine",
+                reviewer_role="SYSTEM",
+                review_roles=["SYSTEM"],
+                comment="Low-risk refund approved by Policy-as-Code.",
+                policy_event=review_policy.to_audit_event(),
+                session_factory=resolve_session_factory(AsyncSessionLocal),
+            )
 
         # 如果需要人工审批，额外发送 ApprovalPanel 组件
         if requires_human:
@@ -432,7 +451,7 @@ async def check_risk_node(state: AgentState) -> dict:
                 },
             })
 
-        return {
+        result = {
             "ticket_id": str(db_ticket_id) if db_ticket_id else order_id,
             "risk_score": risk_data.get("riskScore", 0),
             "risk_level": risk_data.get("riskLevel", "low"),
@@ -444,6 +463,9 @@ async def check_risk_node(state: AgentState) -> dict:
             "policy_events": [review_policy.to_audit_event()],
             "ui_events": events,
         }
+        if approval_id:
+            result["approval_id"] = approval_id
+        return result
 
     except Exception as e:
         logger.error("check_risk_error", error=str(e))

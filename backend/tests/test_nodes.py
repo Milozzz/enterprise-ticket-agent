@@ -53,21 +53,79 @@ class TestLookupOrderNode:
             "createdAt": "2024-01-01T00:00:00",
         }
 
-        with patch("app.agent.nodes.order_lookup.get_order_detail") as mock_tool:
-            mock_tool.invoke.return_value = mock_order
-            result = await lookup_order_node(_base_state())
+        with patch(
+            "app.agent.nodes.order_lookup._get_order_detail_async",
+            new_callable=AsyncMock,
+            return_value=mock_order,
+        ) as loader:
+            result = await lookup_order_node(_base_state(tenant_id="TENANT-A"))
 
         assert result["order_amount"] == 320.0
         assert result["current_step"] == "lookup_order_done"
+        loader.assert_awaited_once_with("789012", tenant_id="TENANT-A")
         ui_types = [e["type"] for e in result["ui_events"]]
         assert "order_card" in ui_types
+
+    @pytest.mark.asyncio
+    async def test_live_connector_values_are_authoritative_over_local_projection(self):
+        from app.agent.nodes.order_lookup import lookup_order_node
+        from app.agent.tool_gateway import ToolExecutionResult
+
+        connector_result = ToolExecutionResult(
+            tool_name="erp_get_order",
+            success=True,
+            data={
+                "connectorId": "CONN-SAP-LIVE",
+                "mode": "live",
+                "requestId": "sap-read-1",
+                "data": {
+                    "orderId": "ERP-ORDER-9",
+                    "amount": "499.50",
+                    "currency": "EUR",
+                    "status": "released",
+                },
+            },
+            audit_event={"tool": "erp_get_order", "success": True},
+        )
+        local_projection = {
+            "canonicalId": "ERP-ORDER-9",
+            "totalAmount": 100.0,
+            "currency": "CNY",
+            "status": "stale",
+            "userId": "7",
+            "erpContext": {"openItems": []},
+        }
+        state = _base_state(
+            order_id="ERP-ORDER-9",
+            connector_id="CONN-SAP-LIVE",
+            tenant_id="TENANT-A",
+        )
+
+        with patch(
+            "app.agent.nodes.order_lookup.execute_erp_connector_tool_async",
+            new_callable=AsyncMock,
+            return_value=connector_result,
+        ), patch(
+            "app.agent.nodes.order_lookup._get_order_detail_async",
+            new_callable=AsyncMock,
+            return_value=local_projection,
+        ):
+            result = await lookup_order_node(state)
+
+        assert result["order_amount"] == 499.5
+        assert result["currency"] == "EUR"
+        assert result["order_detail"]["status"] == "released"
+        assert result["connector_id"] == "CONN-SAP-LIVE"
 
     @pytest.mark.asyncio
     async def test_order_not_found_returns_error(self):
         from app.agent.nodes.order_lookup import lookup_order_node
 
-        with patch("app.agent.nodes.order_lookup.get_order_detail") as mock_tool:
-            mock_tool.invoke.return_value = {"error": "订单不存在"}
+        with patch(
+            "app.agent.nodes.order_lookup._get_order_detail_async",
+            new_callable=AsyncMock,
+            return_value={"error": "订单不存在"},
+        ):
             result = await lookup_order_node(_base_state())
 
         assert "error" in result["current_step"]
@@ -83,8 +141,11 @@ class TestLookupOrderNode:
     async def test_db_exception_handled_gracefully(self):
         from app.agent.nodes.order_lookup import lookup_order_node
 
-        with patch("app.agent.nodes.order_lookup.get_order_detail") as mock_tool:
-            mock_tool.invoke.side_effect = Exception("DB连接超时")
+        with patch(
+            "app.agent.nodes.order_lookup._get_order_detail_async",
+            new_callable=AsyncMock,
+            side_effect=Exception("DB连接超时"),
+        ):
             result = await lookup_order_node(_base_state())
 
         assert "error" in result["current_step"]
@@ -107,6 +168,8 @@ class TestHumanReviewNode:
 
         mock_sess = MagicMock()
         mock_sess.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        mock_sess.scalar = AsyncMock(return_value=None)
+        mock_sess.add = MagicMock()
         mock_sess.commit = AsyncMock()
 
         with patch("app.agent.nodes.human_review.AsyncSessionLocal") as mock_ctx:
@@ -129,6 +192,8 @@ class TestHumanReviewNode:
 
         mock_sess = MagicMock()
         mock_sess.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        mock_sess.scalar = AsyncMock(return_value=None)
+        mock_sess.add = MagicMock()
         mock_sess.commit = AsyncMock()
 
         with patch("app.agent.nodes.human_review.AsyncSessionLocal") as mock_ctx:

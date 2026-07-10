@@ -20,6 +20,7 @@ from datetime import datetime
 from collections.abc import Mapping
 from langgraph.types import interrupt
 from app.agent.approval_tasks import complete_approval_task, ensure_approval_task
+from app.agent.approval_service import persist_approval_evidence
 from app.agent.dependencies import resolve_session_factory
 from app.services.approval_resume import resolve_operator_id
 from app.agent.scenario_registry import get_default_registry
@@ -79,6 +80,7 @@ async def human_review_node(state: AgentState) -> dict:
     ticket_id = get_state_val(state, "ticket_id")
     reviewer_role = get_state_val(state, "user_role") or "USER"
     thread_id = str(get_state_val(state, "thread_id", "") or "")
+    tenant_id = str(get_state_val(state, "tenant_id", "default") or "default")
     task_key = f"refund:{thread_id}:human_review"
 
     if not decision:
@@ -106,7 +108,7 @@ async def human_review_node(state: AgentState) -> dict:
             },
             sla_minutes=scenario.sla_minutes,
             priority="high" if float(get_state_val(state, "risk_score", 0) or 0) >= 80 else "normal",
-            tenant_id=str(get_state_val(state, "tenant_id", "default") or "default"),
+            tenant_id=tenant_id,
             session_factory=resolve_session_factory(AsyncSessionLocal),
         )
         resume_value = interrupt(
@@ -164,7 +166,7 @@ async def human_review_node(state: AgentState) -> dict:
             action=decision,
             reviewer_id=str(reviewer_id or "unknown"),
             comment=review_comment,
-            tenant_id=str(get_state_val(state, "tenant_id", "default") or "default"),
+            tenant_id=tenant_id,
             session_factory=resolve_session_factory(AsyncSessionLocal),
         )
     except Exception as exc:
@@ -190,11 +192,44 @@ async def human_review_node(state: AgentState) -> dict:
                 logger.info("db_ticket_updated", ticket_id=ticket_int_id, status=new_status, operator_id=op_id)
         except Exception as e:
             logger.error("db_update_ticket_error", error=str(e))
+            return {
+                "error_message": "审批工单状态更新失败，已阻止后续 ERP 写操作。",
+                "current_step": "approval_ticket_update_error",
+                "is_completed": True,
+            }
+
+    try:
+        approval_id = await persist_approval_evidence(
+            tenant_id=tenant_id,
+            scenario_id="refund",
+            approval_type="refund_human_approval",
+            thread_id=thread_id,
+            stage_id="human_review",
+            action=decision,
+            reviewer_id=str(reviewer_id or "unknown"),
+            reviewer_role=reviewer_role,
+            review_roles=["MANAGER"],
+            comment=review_comment,
+            policy_event={
+                "effect": "allow",
+                "allowed": True,
+                "matched_rules": [f"refund.human_review.{decision}"],
+            },
+            session_factory=resolve_session_factory(AsyncSessionLocal),
+        )
+    except Exception as exc:
+        logger.error("approval_evidence_persist_failed", error=str(exc), thread_id=thread_id)
+        return {
+            "error_message": "审批决定未能形成持久化证据，已阻止后续 ERP 写操作。",
+            "current_step": "approval_evidence_error",
+            "is_completed": True,
+        }
 
     if decision == "approve":
         logger.info("human_approved", reviewer_id=get_state_val(state, "reviewer_id"))
         return {
             "human_decision": decision,
+            "approval_id": approval_id,
             "reviewer_id": reviewer_id,
             "review_comment": review_comment,
             "current_step": "human_review_approved",

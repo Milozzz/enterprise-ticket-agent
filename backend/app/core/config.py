@@ -195,6 +195,7 @@ class Settings(BaseSettings):
 
     # SAP / ERP Connector runtime. Secrets stay in environment variables and
     # are never persisted in connector records or audit payloads.
+    sap_connector_id: str = "CONN-SAP-ODATA-DEMO"
     sap_connector_mode: str = "mock"  # mock | live
     sap_base_url: str = ""
     sap_auth_type: str = "oauth2_client_credentials"

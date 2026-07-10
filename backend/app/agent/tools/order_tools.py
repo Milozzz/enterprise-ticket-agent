@@ -6,6 +6,7 @@
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from app.db.database import AsyncSessionLocal
+from app.db.tenant_context import apply_tenant_context, current_tenant_id, tenant_scope
 from app.erp.identity import resolve_order_id
 from app.db.models import (
     ApprovalMatrixRule,
@@ -46,22 +47,9 @@ from app.db.models import (
     WebhookSubscription,
 )
 from sqlalchemy import select
-import asyncio
-import threading
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-
-
-# ── 后台事件循环（供同步 @tool 调用异步 DB）──────────────────────
-_loop = asyncio.new_event_loop()
-
-def _start_background_loop(loop: asyncio.AbstractEventLoop) -> None:
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-_thread = threading.Thread(target=_start_background_loop, args=(_loop,), daemon=True)
-_thread.start()
 
 
 # ── Input Schema ──────────────────────────────────────────────────
@@ -73,45 +61,49 @@ class GetOrderDetailInput(BaseModel):
 
 # ── Tool ──────────────────────────────────────────────────────────
 @tool(args_schema=GetOrderDetailInput)
-def get_order_detail(order_id: str) -> dict:
+async def get_order_detail(order_id: str) -> dict:
     """
     查询指定订单的完整详情。
     返回商品列表、订单状态、实付金额、收货地址及物流单号。
     在处理退款申请前必须先调用此工具获取订单信息。
     """
-    future = asyncio.run_coroutine_threadsafe(
-        _get_order_detail_async(order_id), _loop
-    )
-    return future.result()
+    return await _get_order_detail_async(order_id)
 
 
-async def _get_order_detail_async(order_id: str) -> dict:
-    async with AsyncSessionLocal() as session:
-        identity = await resolve_order_id(session, order_id)
-        stmt = select(Order).where(Order.id == identity.canonical_id)
-        result = await session.execute(stmt)
-        order = result.scalar_one_or_none()
+async def _get_order_detail_async(order_id: str, *, tenant_id: str | None = None) -> dict:
+    resolved_tenant = tenant_id or current_tenant_id()
+    with tenant_scope(resolved_tenant):
+        async with AsyncSessionLocal() as session:
+            await apply_tenant_context(session, resolved_tenant)
+            identity = await resolve_order_id(session, order_id, tenant_id=resolved_tenant)
+            stmt = select(Order).where(
+                Order.id == identity.canonical_id,
+                Order.tenant_id == resolved_tenant,
+            )
+            result = await session.execute(stmt)
+            order = result.scalar_one_or_none()
 
-        if not order:
-            return {"error": f"未找到订单 #{order_id}，请确认订单号是否正确"}
+            if not order:
+                return {"error": f"未找到订单 #{order_id}，请确认订单号是否正确"}
 
-        erp_context = await _load_erp_order_context(session, order)
-        return {
-            "id": identity.requested_id,
-            "canonicalId": order.id,
-            "sourceSystem": identity.source_system,
-            "aliasUsed": identity.alias_used,
-            "userId": str(order.user_id),
-            "status": order.status,
-            "items": order.items,
-            "totalAmount": float(order.amount),
-            "currency": order.currency,
-            "shippingAddress": order.shipping_address,
-            "createdAt": order.created_at.isoformat() if order.created_at else None,
-            "trackingNumber": getattr(order, "tracking_number", None),
-            "carrier": getattr(order, "carrier", None),
-            "erpContext": erp_context,
-        }
+            erp_context = await _load_erp_order_context(session, order)
+            return {
+                "id": identity.requested_id,
+                "canonicalId": order.id,
+                "sourceSystem": identity.source_system,
+                "aliasUsed": identity.alias_used,
+                "tenantId": resolved_tenant,
+                "userId": str(order.user_id),
+                "status": order.status,
+                "items": order.items,
+                "totalAmount": float(order.amount),
+                "currency": order.currency,
+                "shippingAddress": order.shipping_address,
+                "createdAt": order.created_at.isoformat() if order.created_at else None,
+                "trackingNumber": getattr(order, "tracking_number", None),
+                "carrier": getattr(order, "carrier", None),
+                "erpContext": erp_context,
+            }
 
 
 async def _load_erp_order_context(session, order: Order) -> dict:

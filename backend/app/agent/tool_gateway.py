@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 import hashlib
 import inspect
@@ -434,10 +435,10 @@ def gateway_context_from_state(
             if get_state_val(state, "approval_id")
             else None
         ),
-        allow_live_write=bool(
-            get_state_val(state, "human_decision") == "approve"
-            or not get_state_val(state, "requires_human_approval", False)
-        ),
+        # Business approval and deployment activation are separate controls.
+        # Approval evidence authorizes the action; connector read-only/shadow
+        # settings still decide whether a real SAP write may leave the system.
+        allow_live_write=False,
     )
 
 
@@ -1004,7 +1005,10 @@ def reset_circuit_breakers() -> None:
 _JSON_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "string": str,
     "integer": int,
-    "number": (int, float),
+    # Financial values stay Decimal inside the application. JSON Schema calls
+    # them numbers even though Decimal is intentionally serialized only at the
+    # connector/API boundary.
+    "number": (int, float, Decimal),
     "boolean": bool,
     "object": dict,
     "array": list,

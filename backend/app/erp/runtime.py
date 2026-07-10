@@ -139,7 +139,13 @@ _HTTP_CLIENTS: dict[str, httpx.AsyncClient] = {}
 
 
 def _http_client(config: "ConnectorRuntimeConfig") -> httpx.AsyncClient:
-    key = f"{config.base_url}|{config.verify_tls}|{config.timeout_seconds}"
+    # Keep clients isolated per logical connector. Different tenants can point
+    # at the same SAP host with different lifecycle and authentication config;
+    # sharing only by URL also leaks stale test/config clients across runtimes.
+    key = (
+        f"{config.connector_id}|{config.base_url}|"
+        f"{config.verify_tls}|{config.timeout_seconds}"
+    )
     client = _HTTP_CLIENTS.get(key)
     if client is None or client.is_closed:
         client = httpx.AsyncClient(
@@ -380,8 +386,6 @@ class SAPODataConnector:
         payload = dict(envelope.get("payload") or {})
         request_id = connector_request_id(envelope)
         is_write = method in WRITE_METHODS
-        if is_write and self.config.read_only and not force_write:
-            raise ERPWriteBlockedError("SAP connector is read-only. Set SAP_READ_ONLY=false after validation.")
         if is_write and self.config.shadow_writes and not force_write:
             return ConnectorExecutionResult(
                 connector_id=self.config.connector_id,
@@ -393,6 +397,8 @@ class SAPODataConnector:
                 shadow=True,
                 request_id=request_id,
             )
+        if is_write and self.config.read_only and not force_write:
+            raise ERPWriteBlockedError("SAP connector is read-only. Set SAP_READ_ONLY=false after validation.")
 
         self._assert_circuit_available()
         path = self._operation_path(operation, payload)
