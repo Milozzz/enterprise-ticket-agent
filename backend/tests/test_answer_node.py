@@ -36,7 +36,6 @@ class TestAnswerNodeFallback:
 
         # 临时置空 api key
         import app.agent.nodes.answer as ans_mod
-        original_key = ans_mod.settings.google_api_key
         ans_mod.settings = MagicMock()
         ans_mod.settings.google_api_key = ""
 
@@ -55,8 +54,6 @@ class TestAnswerNodeFallback:
     async def test_llm_timeout_returns_fallback(self):
         """LLM 超时时返回 fallback 而非抛异常"""
         import asyncio
-        from langchain_core.messages import HumanMessage
-
         mock_llm = AsyncMock()
         mock_llm.ainvoke = AsyncMock(side_effect=asyncio.TimeoutError())
 
@@ -75,7 +72,7 @@ class TestAnswerNodeToolCalls:
     @pytest.mark.asyncio
     async def test_tool_call_response_returns_messages(self):
         """LLM 返回 tool_calls 时，结果 messages 包含 AIMessage，current_step 为 tool_calling"""
-        from langchain_core.messages import HumanMessage, AIMessage
+        from langchain_core.messages import AIMessage
 
         # 模拟有 tool_calls 的 AIMessage
         ai_msg = MagicMock(spec=AIMessage)

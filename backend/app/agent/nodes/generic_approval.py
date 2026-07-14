@@ -14,6 +14,10 @@ from app.agent.approval_tasks import complete_approval_task, ensure_approval_tas
 from app.agent.dependencies import resolve_session_factory
 from app.agent.scenario_registry import ApprovalStageConfig, ScenarioConfig, get_default_registry
 from app.agent.state import AgentState
+from app.agent.plan_graph import mark_plan_steps
+from app.agent.procedural_memory import store_successful_plan
+from app.agent.evidence_graph import add_approval_evidence
+from app.agent.verifier import verify_generic_completion
 from app.agent.utils import get_state_val
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
@@ -220,6 +224,7 @@ async def finalize_business_request_node(state: AgentState) -> dict:
     policy_snapshot = policy_events[-1] if policy_events else None
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
+    persisted = False
     with tenant_scope(tenant_id):
         async with resolve_session_factory(AsyncSessionLocal)() as session:
             if scenario_id == "permission_request":
@@ -269,14 +274,54 @@ async def finalize_business_request_node(state: AgentState) -> dict:
                     record.status = status
                     record.policy_snapshot = policy_snapshot
             await session.commit()
+            persisted = record is not None
 
     final_status = "rejected" if rejected else "approved"
     request["status"] = final_status
+    evidence_graph = add_approval_evidence(
+        get_state_val(state, "evidence_graph", {}) or {},
+        subject=request_id,
+        decision="reject" if rejected else "approve",
+        reviewer_id=str(get_state_val(state, "reviewer_id", "") or ""),
+        trace_id=str(get_state_val(state, "trace_id", "") or ""),
+    )
+    plan_graph = mark_plan_steps(
+        get_state_val(state, "plan_graph", {}) or {},
+        {"approve": "blocked" if rejected else "completed"},
+        graph_status="blocked" if rejected else "completed",
+    )
+    completion_verification = verify_generic_completion(
+        scenario_id=scenario_id,
+        task_spec=get_state_val(state, "task_spec", {}) or {},
+        plan_graph=plan_graph,
+        evidence_graph=evidence_graph,
+        persisted=persisted,
+    )
+    if completion_verification.status.value != "pass":
+        plan_graph = {**plan_graph, "status": "blocked"}
+    procedural_state = {**dict(state), "plan_graph": plan_graph}
+    if not rejected and completion_verification.status.value == "pass":
+        try:
+            await store_successful_plan(
+                procedural_state,
+                session_factory=resolve_session_factory(AsyncSessionLocal),
+            )
+        except Exception as exc:
+            logger.warning("procedural_memory_store_failed", error=str(exc))
     return {
         "business_request": request,
         "is_completed": True,
         "current_step": f"{scenario_id}_{final_status}",
         "reply_text": f"{request_id} 已{('拒绝' if rejected else '批准')}并写入企业业务数据层。",
+        "plan_graph": plan_graph,
+        "evidence_graph": evidence_graph,
+        "verification_result": completion_verification.model_dump(mode="json"),
+        "error_message": (
+            "Post-execution verification failed: "
+            + "; ".join(issue.message for issue in completion_verification.issues)
+            if completion_verification.status.value != "pass"
+            else ""
+        ),
         "ui_events": [
             {
                 "type": "thinking_stream",

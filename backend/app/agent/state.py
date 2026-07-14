@@ -6,7 +6,6 @@ from typing import Annotated
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
-import operator
 
 # H3（长对话优化）：事件类列表的累积上限。这些列表只是运行时便利
 # （SSE 消费的是节点输出流，权威审计在 audit_logs 表），但 checkpointer
@@ -53,6 +52,13 @@ class AgentState(TypedDict, total=False):
     credit_memo_id: str
     clearing_document_id: str
     compensation: dict
+    return_authorization_id: str
+    return_validation: dict
+    inventory_inspection: dict
+    inventory_restoration: dict
+    inventory_movement_id: str
+    reconciliation_result: dict
+    final_reconciliation: dict
     notification_sent: bool
     notification_email_id: str
     human_decision: str
@@ -84,6 +90,22 @@ class AgentState(TypedDict, total=False):
     policy_events: Annotated[list, capped_add]
     prompt_events: Annotated[list, capped_add]
     specialist_handoffs: Annotated[list, capped_add]
+    task_spec: dict
+    plan_graph: dict
+    evidence_graph: dict
+    evidence_persistence: dict
+    human_fallback_task: dict
+    verification_result: dict
+    replan_count: int
+    plan_precedents: list
+    plan_generation_method: str
+    execution_budget: dict
+    execution_journal: Annotated[list, capped_add]
+    agent_id: str
+    delegation_token: str
+    delegation_grant: dict
+    data_provenance: dict
+    information_flow_events: Annotated[list, capped_add]
     # RAG 政策检索结果（answer_policy_node 填充）
     policy_results: list
     policy_citations: list

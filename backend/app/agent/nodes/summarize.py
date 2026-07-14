@@ -13,7 +13,8 @@ from datetime import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from app.agent.dependencies import get_agent_dependencies, resolve_session_factory
-from app.agent.long_term_memory import capture_explicit_preferences
+from app.agent.long_term_memory import capture_explicit_preferences, capture_task_episode
+from app.agent.procedural_memory import store_successful_plan
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.core.logging import get_logger
@@ -95,6 +96,39 @@ async def summarize_session_node(state: AgentState) -> dict:
     读取 state.messages → LLM 压缩 → 与旧摘要合并 → 写回 UserMemory.notes
     """
     user_id = get_state_val(state, "user_id", "")
+
+    if get_state_val(state, "refund_success", False):
+        try:
+            await store_successful_plan(
+                state,
+                session_factory=resolve_session_factory(AsyncSessionLocal),
+            )
+        except Exception as exc:
+            logger.warning("procedural_memory_store_failed", error=str(exc))
+
+    if get_state_val(state, "task_spec", {}):
+        outcome = (
+            "rejected"
+            if get_state_val(state, "human_decision", "") == "reject"
+            else "completed"
+            if get_state_val(state, "is_completed", False)
+            or (get_state_val(state, "plan_graph", {}) or {}).get("status") == "completed"
+            else "blocked"
+            if get_state_val(state, "error_message", "")
+            else "ended"
+        )
+        try:
+            await capture_task_episode(
+                dict(state),
+                outcome=outcome,
+                human_override=bool(
+                    get_state_val(state, "reviewer_id", "")
+                    and get_state_val(state, "human_decision", "")
+                ),
+                session_factory=resolve_session_factory(AsyncSessionLocal),
+            )
+        except Exception as exc:
+            logger.warning("episodic_memory_store_failed", error=str(exc))
 
     try:
         uid = int(user_id)

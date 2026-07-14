@@ -46,14 +46,43 @@
     ]
   },
   "runtime": {
-    "schema_version": "2",
+    "schema_version": "3",
+    "engine": "langgraph",
+    "entry_node": "prepare_request",
+    "nodes": [
+      { "id": "prepare_request", "handler": "configured_prepare" },
+      { "id": "human_review", "handler": "generic_human_review" },
+      { "id": "finalize_request", "handler": "generic_finalize", "plan_step": "approve" }
+    ],
+    "edges": [
+      { "from": "finalize_request", "to": "$end" }
+    ],
+    "conditional_edges": [
+      {
+        "from": "prepare_request",
+        "router": "generic_after_prepare",
+        "routes": { "review": "human_review", "finalize": "finalize_request" }
+      },
+      {
+        "from": "human_review",
+        "router": "generic_after_review",
+        "routes": {
+          "review": "human_review",
+          "finalize": "finalize_request",
+          "end": "$end"
+        }
+      }
+    ],
     "approval_type": "permission_request",
     "current_step": "permission_request_done",
     "slot_extraction": {
       "fields": {
         "system": {
           "type": "keyword_map",
-          "default": "unknown_system",
+          "default": "",
+          "required": true,
+          "label": "目标系统",
+          "prompt": "请说明要申请哪个系统的权限，例如 GitHub、Jira 或生产数据库。",
           "fallback_regex": "(?:申请|开通|访问)\\s*([A-Za-z0-9_-]{2,})\\s*(?:权限|access)?",
           "patterns": [
             { "value": "GitHub", "keywords": ["github", "gitlab", "代码仓库", "仓库"] },
@@ -66,6 +95,7 @@
         "permission_level": {
           "type": "keyword_enum",
           "default": "read",
+          "label": "权限级别",
           "options": [
             { "value": "admin", "keywords": ["管理员", "admin", "owner", "超级"] },
             { "value": "approve", "keywords": ["审批", "approve", "approval"] },
@@ -75,6 +105,8 @@
         "reason": {
           "type": "message_excerpt",
           "max_length": 500,
+          "required": true,
+          "label": "申请原因",
           "default": "No reason provided."
         }
       }

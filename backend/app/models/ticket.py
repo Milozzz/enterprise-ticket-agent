@@ -34,6 +34,7 @@ class ChatRequest(BaseModel):
     trace_id: str | None = None   # 端到端追踪 ID，由前端生成
     user_role: str | None = None
     user_id: str | None = None
+    delegation_token: str | None = Field(default=None, max_length=4096)
 
 
 class ResumeRequest(BaseModel):

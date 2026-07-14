@@ -53,7 +53,10 @@ def test_p0_release_report_passes_all_quality_gates():
         "rag_cases": 12,
         "safety_cases": 24,
         "judge_cases": 2,
-    }
+            "production_quality_cases": 120,
+            "agent_depth_cases": 48,
+            "agent_resilience_cases": 14,
+        }
 
 
 def test_repository_hygiene_rules_reject_sensitive_artifacts():

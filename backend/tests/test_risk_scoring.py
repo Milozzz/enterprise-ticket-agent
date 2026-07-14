@@ -5,7 +5,6 @@
 不依赖数据库或 LLM，可在 CI 中直接运行。
 """
 
-import pytest
 from unittest.mock import patch
 from app.agent.tools.refund_tools import check_risk_level
 

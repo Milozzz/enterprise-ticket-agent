@@ -6,7 +6,7 @@
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from app.agent.nodes.classifier import _rule_classify, classify_intent_node
 from langchain_core.messages import HumanMessage
 
@@ -185,3 +185,20 @@ class TestLLMClassifyFallback:
 
         assert len(result.get("ui_events", [])) > 0
         assert result["ui_events"][0]["type"] == "thinking_stream"
+
+    @pytest.mark.asyncio
+    async def test_supervisor_prefill_skips_duplicate_classification(self):
+        state = {
+            "messages": [HumanMessage(content="订单 789012 申请退款，商品破损")],
+            "intent": "refund",
+            "order_id": "789012",
+            "refund_reason": "damaged",
+            "supervisor_decision": {"classification_prefilled": True},
+        }
+
+        with patch("app.agent.nodes.classifier._llm_classify") as llm_classify:
+            result = await classify_intent_node(state)
+
+        llm_classify.assert_not_called()
+        assert result["current_step"] == "classify_intent_done"
+        assert "复用 Supervisor" in result["ui_events"][0]["data"]["steps"][0]["detail"]

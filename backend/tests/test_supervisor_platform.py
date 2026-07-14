@@ -40,6 +40,20 @@ def test_supervisor_routes_reimbursement_request():
     assert result["supervisor_decision"]["workflow"] == "reimbursement_workflow"
 
 
+def test_supervisor_prefills_clear_refund_sub_intent():
+    state = {
+        "messages": [{"role": "user", "content": "订单号 123456 申请退款，商品破损"}],
+        "thread_id": "supervisor-fast-path",
+    }
+
+    result = asyncio.run(supervisor_router_node(state))
+
+    assert result["scenario_id"] == "refund"
+    assert result["intent"] == "refund"
+    assert result["order_id"] == "123456"
+    assert result["supervisor_decision"]["classification_prefilled"] is True
+
+
 def test_permission_request_policy_requires_human_for_admin_access():
     decision = evaluate_permission_request_policy(system="GitHub", permission_level="admin")
 

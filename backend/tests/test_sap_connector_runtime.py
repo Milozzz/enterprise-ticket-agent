@@ -32,6 +32,7 @@ from app.erp.runtime import (
     ERPWriteBlockedError,
     SAPODataConnector,
     execute_connector_envelope,
+    run_connector_acceptance,
 )
 
 
@@ -90,6 +91,19 @@ def test_connector_control_plane_requires_change_ticket_for_unshadowed_live_writ
         assert "change_ticket" in str(getattr(exc, "detail", ""))
     else:
         raise AssertionError("live writes must require a change ticket")
+
+
+def test_connector_acceptance_distinguishes_mock_wiring_from_live_evidence():
+    report = asyncio.run(run_connector_acceptance("CONN-MOCK-ERP"))
+
+    assert report["passed"] is True
+    assert report["live_verified"] is False
+    assert report["evidence_level"] == "mock_only"
+    assert {check["id"] for check in report["checks"]} >= {
+        "health",
+        "odata_read_contract",
+        "safe_activation",
+    }
 
 
 def test_enterprise_readiness_passes_internal_gates_and_reports_external_blockers():

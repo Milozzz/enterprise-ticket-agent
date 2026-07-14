@@ -14,7 +14,7 @@ _SENSITIVE_KEYS = {
     "phone", "mobile",
     "id_card", "idcard", "id_number",
     "bank_account", "bankaccount",
-    "password", "token", "secret", "app_password",
+    "password", "token", "delegationtoken", "principaltoken", "secret", "app_password",
 }
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}")

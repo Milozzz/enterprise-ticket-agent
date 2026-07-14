@@ -25,12 +25,12 @@ CacheWriter = Callable[[str, int, str], Awaitable[None]]
 DirectApprover = Callable[..., Awaitable[dict]]
 
 NODE_NAMES = {
-    "supervisor_router",
+    "supervisor_router", "task_understanding", "verify_execution",
     "classify_intent", "lookup_order", "check_risk", "risk_fanout",
     "fetch_user_history", "risk_decision", "human_review", "execute_refund",
     "send_notification", "permission_request", "reimbursement",
     "generic_human_review", "finalize_business_request", "answer_node",
-    "answer_policy_node", "summarize_session",
+    "answer_policy_node", "summarize_session", "dynamic_dispatch",
 }
 
 NODE_STATE_MAP = {
@@ -98,12 +98,32 @@ async def stream_agent(
     database_down_check: Callable[[], bool] = effective_simulate_database_down,
 ) -> AsyncIterator[str]:
     collected: list[str] = []
+    stream_started = time.monotonic()
+    first_result_recorded = False
+
+    async def record_first_result(node_name: str) -> None:
+        nonlocal first_result_recorded
+        if first_result_recorded:
+            return
+        first_result_recorded = True
+        first_result_ms = int((time.monotonic() - stream_started) * 1000)
+        await audit_writer(
+            thread_id,
+            "stream_first_result",
+            "metric",
+            {"source_node": node_name},
+            {"metric": "time_to_first_result_ms", "value": first_result_ms},
+            trace_id=trace_id,
+            duration_ms=first_result_ms,
+        )
     try:
         if database_down_check():
             yield encode_sse("text", {"content": busy_message})
             yield encode_sse("done", {})
             return
 
+        # SSE comment forces an early body flush through Vercel/Render proxies.
+        yield ": stream-open\n\n"
         yield encode_sse("meta", {"trace_id": trace_id, "thread_id": thread_id})
         yield encode_sse("text", {"content": "已收到请求，Supervisor 正在选择业务场景并准备执行...\n\n"})
 
@@ -154,20 +174,24 @@ async def stream_agent(
                         chunk = encode_sse("ui", ui_event_payload(ui_event))
                         collected.append(chunk)
                         yield chunk
+                        await record_first_result(event_name)
                     if output.get("reply_text"):
                         chunk = encode_sse("text", {"content": output["reply_text"]})
                         collected.append(chunk)
                         yield chunk
+                        await record_first_result(event_name)
                     elif output.get("error_message"):
                         chunk = encode_sse("text", {"content": f"⚠️ {output['error_message']}"})
                         collected.append(chunk)
                         yield chunk
+                        await record_first_result(event_name)
             elif event_type == "on_chat_model_stream":
                 model_chunk = event.get("data", {}).get("chunk")
                 if model_chunk and getattr(model_chunk, "content", None):
                     chunk = encode_sse("text", {"content": model_chunk.content})
                     collected.append(chunk)
                     yield chunk
+                    await record_first_result(event_name or "chat_model")
 
         final = graph.get_state(config)
         if final and final.values:

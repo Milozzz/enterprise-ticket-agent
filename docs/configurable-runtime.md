@@ -1,6 +1,6 @@
 # 配置驱动运行时
 
-本阶段把权限申请、报销两个场景从“每个场景一个完整 Python node”升级为“同一个 Generic Scenario Runtime 读取场景配置执行”。
+平台已把退款、权限申请、报销三个活跃场景统一到 runtime v3：场景配置声明 LangGraph 拓扑，权限与报销继续复用 Generic Scenario Runtime 的抽槽、Policy、Tool Gateway 和 UI handler。
 
 ## 目标
 
@@ -36,6 +36,23 @@
 }
 ```
 
+活跃场景使用 runtime v3 声明 LangGraph 拓扑，并可携带 v2 的通用抽槽、工具、策略与 UI 合同：
+
+```json
+{
+  "runtime": {
+    "schema_version": "3",
+    "engine": "langgraph",
+    "entry_node": "classify_intent",
+    "nodes": [{"id": "classify_intent", "handler": "classify_intent", "plan_step": "understand"}],
+    "edges": [],
+    "conditional_edges": []
+  }
+}
+```
+
+`handler` 和 `router` 必须来自后端受信目录，配置无法加载任意代码。`plan_step`/`plan_steps` 把节点绑定到可执行计划。发布前 validator 会检查重复节点、未知 handler/router、非法入口、悬空边、隐式终点和通用 runtime 合同。
+
 ## 执行链路
 
 通用运行时执行顺序：
@@ -50,6 +67,8 @@
 8. 根据 `reply_template` 生成最终回复
 9. 将 `state_outputs` 写回 LangGraph state
 
+在 v3 图中，上述操作由受信 handler 拆分执行。每个绑定计划步骤的节点先经过依赖、预算和 Evidence 授权；有副作用的步骤还必须具备 Policy/HITL 证据。完成后执行后置验证，通过后才把 PlanGraph 标记为 completed。
+
 ## 当前支持的 slot extractor
 
 - `keyword_map`：根据关键词映射到业务值，例如 `github -> GitHub`
@@ -59,14 +78,14 @@
 
 ## 当前收益
 
-权限申请和报销的 node 已经变成薄入口：
+权限申请和报销的业务差异已经迁移到配置，代码只保留受信的通用 handler：
 
 ```python
 async def permission_request_node(state):
     return await run_configured_scenario(state, "permission_request")
 ```
 
-这说明两个场景的主要差异已经迁移到配置中：
+这说明场景的主要差异已经迁移到配置中：
 
 - 字段抽取不同
 - 工具不同
@@ -109,12 +128,14 @@ POST /api/admin/scenarios/{scenario_id}/simulate-runtime
 
 这个接口不会产生真实业务副作用，适合后续接到 Scenario Studio，用于预览一个新场景是否真的能跑通。
 
-## 仍需完善
+## 已补齐的生产能力
 
-下一步可以继续做：
-
-- Runtime Simulation 前端化：在 Scenario Studio 中预览完整执行链路
-- Draft/Publish/Version：配置发布和回滚治理
-- 多节点 workflow 配置：不止支持单工具调用
-- 缺失字段追问：slot 不完整时不直接执行
-- LLM extractor fallback：规则抽取失败时使用结构化 LLM 抽取
+- Runtime Simulation 已接入 Scenario Studio。
+- Draft/Publish/Version/Rollback 已形成配置治理链路。
+- runtime v3 支持多节点、普通边、条件边和 Specialist 子图。
+- 退款、权限申请、报销全部使用 runtime v3，v2 仅作为兼容 schema。
+- 节点级 `plan_step` 绑定让 PlanGraph 直接治理运行时，而不是只用于展示。
+- 通用后置 Verifier 与退款财务 reconciliation 阻止“工具返回成功但业务未真正落库”。
+- required slot 缺失时通过 interrupt 追问，仍缺失则 fail closed。
+- 结构化 LLM slot extractor 可按环境开启，规则抽取作为低延迟降级路径。
+- Planner 增加步数、deadline、连续失败、副作用白名单和重复调用保护；写操作默认不交给自由规划。

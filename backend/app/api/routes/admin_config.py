@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import hmac
-import os
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -33,7 +32,11 @@ from app.agent.scenario_registry import (
     get_default_registry,
     reload_default_registry,
 )
-from app.agent.scenario_schema import RUNTIME_V2_SCHEMA
+from app.agent.scenario_schema import RUNTIME_SCHEMAS, RUNTIME_V2_SCHEMA, RUNTIME_V3_SCHEMA
+from app.agent.plan_graph import specialist_catalog_report
+from app.agent.agent_depth_eval import run_agent_depth_eval
+from app.agent.agent_resilience_eval import run_agent_resilience_eval
+from app.agent.evidence_store import load_persisted_evidence_graph
 from app.agent.scenario_validation import (
     summarize_validation,
     validate_scenario_config,
@@ -50,6 +53,7 @@ from app.agent.tool_gateway import list_tool_specs, tool_registry_report
 from app.agent.workflow_factory import WORKFLOW_ENTRYPOINTS
 from app.core.policy import get_policy_version, load_policy
 from app.core.config import get_settings
+from app.db.database import AsyncSessionLocal
 
 router = APIRouter()
 
@@ -213,6 +217,8 @@ async def get_scenario_admin_config() -> dict[str, Any]:
         "policy_version": get_policy_version(),
         "validation_summary": summarize_validation(reports),
         "runtime_schema": RUNTIME_V2_SCHEMA,
+        "runtime_schemas": RUNTIME_SCHEMAS,
+        "specialist_catalog": specialist_catalog_report(),
         "eval_catalog": list_scenario_eval_catalog(),
         "templates": list_scenario_templates(),
         "roles": ["USER", "AGENT", "MANAGER", "SECURITY", "FINANCE"],
@@ -233,6 +239,46 @@ async def validate_scenario_payload(payload: ScenarioConfigPayload) -> dict[str,
 @router.get("/scenarios/schema/runtime-v2")
 async def get_runtime_v2_schema() -> dict[str, Any]:
     return RUNTIME_V2_SCHEMA
+
+
+@router.get("/scenarios/schema/runtime-v3")
+async def get_runtime_v3_schema() -> dict[str, Any]:
+    return RUNTIME_V3_SCHEMA
+
+
+@router.get("/scenarios/schema/runtime")
+async def get_runtime_schemas() -> dict[str, Any]:
+    return {"versions": RUNTIME_SCHEMAS, "latest": "3"}
+
+
+@router.get("/agent-architecture")
+async def get_agent_architecture() -> dict[str, Any]:
+    return {
+        "runtime": "TaskSpec -> PlanGraph -> Specialists -> EvidenceGraph -> Verifier -> Policy/HITL -> Executor",
+        "specialists": specialist_catalog_report(),
+        "depth_eval": run_agent_depth_eval(),
+        "resilience_eval": run_agent_resilience_eval(),
+        "dynamic_planning_default": "disabled; validated deterministic plan remains the production fallback",
+    }
+
+
+@router.get(
+    "/evidence/tasks/{task_id}",
+    dependencies=[Depends(require_admin_api_key)],
+)
+async def get_task_evidence(
+    task_id: str,
+    tenant_id: Annotated[str | None, Header(alias="X-Tenant-ID")] = None,
+) -> dict[str, Any]:
+    tenant = tenant_id or get_settings().default_tenant_id
+    graph = await load_persisted_evidence_graph(
+        task_id,
+        tenant_id=tenant,
+        session_factory=AsyncSessionLocal,
+    )
+    if not graph["claims"]:
+        raise HTTPException(status_code=404, detail="Task evidence was not found")
+    return {"evidence_graph": graph}
 
 
 def _normalize_approval_chain(chain: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -330,6 +376,11 @@ async def get_all_scenario_eval_report() -> dict[str, Any]:
 @router.get("/evals/p0-report")
 async def get_p0_eval_report() -> dict[str, Any]:
     return {"eval_report": await run_p0_eval_report(use_llm_judge=False)}
+
+
+@router.get("/evals/agent-resilience")
+async def get_agent_resilience_report() -> dict[str, Any]:
+    return {"eval_report": run_agent_resilience_eval()}
 
 
 @router.get("/evals/enterprise-readiness")

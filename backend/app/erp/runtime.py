@@ -788,6 +788,87 @@ async def connector_runtime_health(connector_id: str) -> dict[str, Any]:
     }
 
 
+async def run_connector_acceptance(
+    connector_id: str,
+    *,
+    principal_token: str | None = None,
+) -> dict[str, Any]:
+    """Run a non-destructive authentication and OData contract probe."""
+    connector = await get_connector(connector_id)
+    config = connector.config
+    checks: list[dict[str, Any]] = []
+
+    def add(check_id: str, passed: bool, details: dict[str, Any] | None = None) -> None:
+        checks.append(
+            {
+                "id": check_id,
+                "passed": bool(passed),
+                "status": "PASS" if passed else "FAIL",
+                "details": details or {},
+            }
+        )
+
+    add("base_url", config.mode == "mock" or bool(config.base_url))
+    add(
+        "enterprise_auth",
+        config.mode == "mock"
+        or config.auth_type
+        in {"api_key", "oauth2_client_credentials", "principal_propagation", "bearer"},
+        {"auth_type": config.auth_type},
+    )
+    add(
+        "safe_activation",
+        config.mode == "mock" or config.read_only or config.shadow_writes,
+        {"read_only": config.read_only, "shadow_writes": config.shadow_writes},
+    )
+
+    health = await connector.health()
+    add("health", health.get("status") in {"healthy", "configured"}, health)
+
+    read_result: ConnectorExecutionResult | None = None
+    read_error: str | None = None
+    try:
+        read_result = await connector.execute(
+            {
+                "connectorId": connector_id,
+                "operation": "query_doctype",
+                "method": "GET",
+                "payload": {
+                    "doctype": "business_partner",
+                    "query": {"$top": 1, "$select": "BusinessPartner"},
+                },
+            },
+            principal_token=principal_token,
+        )
+    except ERPConnectorError as exc:
+        read_error = str(exc)
+    add(
+        "odata_read_contract",
+        bool(read_result and read_result.success and isinstance(read_result.data, Mapping)),
+        {
+            "status_code": read_result.status_code if read_result else None,
+            "duration_ms": read_result.duration_ms if read_result else None,
+            "error": read_error,
+        },
+    )
+
+    passed = all(check["passed"] for check in checks)
+    live_verified = passed and config.mode == "live"
+    return {
+        "connector_id": connector_id,
+        "mode": config.mode,
+        "passed": passed,
+        "live_verified": live_verified,
+        "evidence_level": "live_read_contract" if live_verified else "mock_only",
+        "checks": checks,
+        "next_action": (
+            None
+            if live_verified
+            else "Configure a live SAP sandbox and rerun this acceptance probe."
+        ),
+    }
+
+
 async def _reserve_idempotency(
     *,
     connector_id: str,

@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import (
     a2a_server,
     agent_jobs,
+    agent_governance,
     admin_config,
     approvals,
     chat,
@@ -17,6 +18,7 @@ from app.api.routes import (
     erp_governance,
     erp_runtime,
     mcp_server,
+    memories,
     prompt_governance,
     tickets,
 )
@@ -229,7 +231,13 @@ app.add_middleware(TenantContextMiddleware)
 
 app.include_router(chat.router, prefix="/api/agent", tags=["Agent"])
 app.include_router(agent_jobs.router, prefix="/api/agent/jobs", tags=["Agent Jobs"])
+app.include_router(
+    agent_governance.router,
+    prefix="/api/agent/governance",
+    tags=["Agent Governance"],
+)
 app.include_router(approvals.router, prefix="/api/agent", tags=["Agent"])
+app.include_router(memories.router, prefix="/api/agent/memories", tags=["Agent Memory"])
 app.include_router(tickets.router, prefix="/api/tickets", tags=["Tickets"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(admin_config.router, prefix="/api/admin", tags=["Admin"])

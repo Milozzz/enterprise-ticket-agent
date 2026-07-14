@@ -25,6 +25,7 @@ from app.erp.runtime import (
     ERPConnectorError,
     connector_runtime_health,
     load_connector_runtime_config,
+    run_connector_acceptance,
 )
 
 
@@ -162,6 +163,22 @@ async def get_runtime_health(
 ) -> dict[str, Any]:
     try:
         return await connector_runtime_health(connector_id)
+    except ERPConnectorError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/runtime/{connector_id}/acceptance")
+async def run_runtime_acceptance(
+    connector_id: str,
+    user: Annotated[dict, Depends(_runtime_user)],
+    principal_token: Annotated[str | None, Header(alias="X-SAP-Principal-Token")] = None,
+) -> dict[str, Any]:
+    _require_connector_admin(user)
+    try:
+        return await run_connector_acceptance(
+            connector_id,
+            principal_token=principal_token,
+        )
     except ERPConnectorError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

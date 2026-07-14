@@ -4,6 +4,8 @@
 """
 
 from app.agent.state import AgentState
+from app.agent.evidence_graph import collect_refund_evidence
+from app.agent.plan_graph import mark_plan_steps
 from app.agent.utils import get_state_val
 from app.agent.tool_gateway import execute_tool, gateway_context_from_state
 from app.agent.tools.notification_tools import send_notification
@@ -14,6 +16,14 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+
+def _plan_completion(state: AgentState, notification_status: str) -> dict:
+    return mark_plan_steps(
+        get_state_val(state, "plan_graph", {}) or {},
+        {"notify": notification_status},
+        graph_status="running" if notification_status == "completed" else "blocked",
+    )
 
 
 async def send_notification_node(state: AgentState) -> dict:
@@ -52,15 +62,20 @@ async def send_notification_node(state: AgentState) -> dict:
             logger.warning("notification_duplicate_redis_skipped", refund_id=refund_id, idem_key=notify_key)
             ui_thinking["data"]["steps"][0]["status"] = "done"
             ui_thinking["data"]["steps"][0]["detail"] = "通知已发送过，跳过重复邮件"
-            return {
+            result = {
                 "notification_sent": True,
                 "notification_email_id": f"DEDUP_{notify_key[-12:]}",
                 "notification_to": finance_email,
-                "is_completed": True,
-                "current_step": "completed",
+                "is_completed": False,
+                "current_step": "notification_sent",
                 "idempotency_key": notify_key,
                 "idempotent_replay": True,
                 "ui_events": [ui_thinking],
+                "plan_graph": _plan_completion(state, "completed"),
+            }
+            return {
+                **result,
+                "evidence_graph": collect_refund_evidence({**dict(state), **result}),
             }
 
         notification_args = {
@@ -73,7 +88,11 @@ async def send_notification_node(state: AgentState) -> dict:
         gateway_result = execute_tool(
             "send_notification",
             notification_args,
-            context=gateway_context_from_state(state, actor_role="AGENT"),
+            context=gateway_context_from_state(
+                state,
+                actor_role="AGENT",
+                specialist_id="executor",
+            ),
             handler=send_notification,
         )
         if not gateway_result.success:
@@ -104,26 +123,32 @@ async def send_notification_node(state: AgentState) -> dict:
             },
         }
 
-        return {
+        result = {
             "notification_sent": True,
             "notification_email_id": notif_data.get("email_id", ""),
             "notification_to": finance_email,          # 供链路回放展示（写库前会被脱敏）
-            "is_completed": True,
-            "current_step": "completed",
+            "is_completed": False,
+            "current_step": "notification_sent",
             "idempotency_key": notify_key,
             "tool_gateway_events": [gateway_result.audit_event],
             "ui_events": [ui_thinking, ui_email],
+            "plan_graph": _plan_completion(state, "completed"),
+        }
+        return {
+            **result,
+            "evidence_graph": collect_refund_evidence({**dict(state), **result}),
         }
 
     except Exception as e:
         import traceback
         logger.error("send_notification_error", error=str(e), traceback=traceback.format_exc())
-        # 通知发送失败不影响退款结果，只记录日志
-        ui_thinking["data"]["steps"][0]["status"] = "done"
-        ui_thinking["data"]["steps"][0]["detail"] = f"通知发送失败（不影响退款）：{e}"
+        ui_thinking["data"]["steps"][0]["status"] = "error"
+        ui_thinking["data"]["steps"][0]["detail"] = f"通知发送失败，任务已转入人工处理：{e}"
         return {
             "notification_sent": False,
-            "is_completed": True,
-            "current_step": "completed_notification_failed",
+            "is_completed": False,
+            "error_message": f"Notification delivery failed: {e}",
+            "current_step": "notification_delivery_blocked",
             "ui_events": [ui_thinking],
+            "plan_graph": _plan_completion(state, "blocked"),
         }

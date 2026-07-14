@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -20,6 +21,13 @@ from time import perf_counter
 from typing import Any, Mapping
 
 from app.agent.utils import get_state_val
+from app.agent.delegation import DelegationDecision, authorize_delegated_tool
+from app.agent.information_flow import (
+    InformationFlowDecision,
+    provenance_for_tool_output,
+    validate_information_flow,
+)
+from app.core.agent_safety import inspect_untrusted_text
 from app.core.config import get_settings
 from app.core.policy import PolicyDecision, evaluate_action_policy
 from app.erp.connectors import (
@@ -82,7 +90,10 @@ class ToolExecutionContext:
     dry_run: bool = False
     tenant_id: str = "default"
     approval_id: str | None = None
+    specialist_id: str | None = None
+    agent_id: str = "enterprise-ticket-agent"
     principal_token: str | None = field(default=None, repr=False)
+    argument_provenance: Mapping[str, Any] = field(default_factory=dict)
     allow_live_write: bool = False
 
 
@@ -97,6 +108,11 @@ class ToolExecutionResult:
     duration_ms: int = 0
     idempotency_key: str | None = None
     audit_event: dict[str, Any] | None = None
+    output_provenance: dict[str, Any] | None = None
+
+
+class ToolOutputRejected(ValueError):
+    """The tool responded, but its untrusted output failed the gateway contract."""
 
 
 @dataclass
@@ -143,6 +159,80 @@ TOOL_SPECS: dict[str, ToolSpec] = {
                 "amount": {"type": "number"},
                 "user_id": {"type": "string"},
             },
+        },
+    ),
+    "validate_return": ToolSpec(
+        name="validate_return",
+        action="validate_return",
+        description="Validate return authorization, warehouse receipt, and inspection state.",
+        risk_level=ToolRiskLevel.MEDIUM,
+        side_effect=ToolSideEffect.DECISION,
+        category="returns",
+        owner="Warehouse Operations",
+        timeout_seconds=5.0,
+        input_schema={
+            "type": "object",
+            "required": ["order_id"],
+            "properties": {"order_id": {"type": "string"}},
+        },
+        output_schema={
+            "type": "object",
+            "required": ["valid", "order_id", "reason"],
+        },
+    ),
+    "inspect_return_inventory": ToolSpec(
+        name="inspect_return_inventory",
+        action="inspect_return_inventory",
+        description="Read return-related inventory, batch, and warehouse consistency.",
+        risk_level=ToolRiskLevel.LOW,
+        side_effect=ToolSideEffect.READ,
+        category="inventory",
+        owner="Warehouse Operations",
+        timeout_seconds=5.0,
+        input_schema={
+            "type": "object",
+            "required": ["order_id"],
+            "properties": {"order_id": {"type": "string"}},
+        },
+    ),
+    "restore_return_inventory": ToolSpec(
+        name="restore_return_inventory",
+        action="restore_return_inventory",
+        description="Restore or quarantine returned inventory after governed refund approval.",
+        risk_level=ToolRiskLevel.HIGH,
+        side_effect=ToolSideEffect.WRITE,
+        category="inventory",
+        owner="Warehouse Operations",
+        timeout_seconds=8.0,
+        retry_limit=1,
+        approval_required=True,
+        idempotency_fields=("order_id", "rma_id"),
+        idempotency_namespace="return_inventory",
+        input_schema={
+            "type": "object",
+            "required": ["order_id", "rma_id"],
+            "properties": {
+                "order_id": {"type": "string"},
+                "rma_id": {"type": "string"},
+            },
+        },
+    ),
+    "reverse_inventory_movement": ToolSpec(
+        name="reverse_inventory_movement",
+        action="reverse_inventory_movement",
+        description="Compensate a previously completed return inventory movement.",
+        risk_level=ToolRiskLevel.HIGH,
+        side_effect=ToolSideEffect.WRITE,
+        category="inventory",
+        owner="Warehouse Operations",
+        timeout_seconds=8.0,
+        approval_required=True,
+        idempotency_fields=("movement_id",),
+        idempotency_namespace="return_inventory_reversal",
+        input_schema={
+            "type": "object",
+            "required": ["movement_id"],
+            "properties": {"movement_id": {"type": "string"}},
         },
     ),
     "execute_refund": ToolSpec(
@@ -419,6 +509,7 @@ def gateway_context_from_state(
     actor_role: str | None = None,
     dry_run: bool = False,
     scenario: str = "refund",
+    specialist_id: str | None = None,
 ) -> ToolExecutionContext:
     requested_by_role = str(get_state_val(state, "user_role", "USER") or "USER")
     return ToolExecutionContext(
@@ -435,6 +526,17 @@ def gateway_context_from_state(
             if get_state_val(state, "approval_id")
             else None
         ),
+        specialist_id=specialist_id,
+        agent_id=str(
+            get_state_val(state, "agent_id", "enterprise-ticket-agent")
+            or "enterprise-ticket-agent"
+        ),
+        principal_token=(
+            str(get_state_val(state, "delegation_token"))
+            if get_state_val(state, "delegation_token")
+            else None
+        ),
+        argument_provenance=dict(get_state_val(state, "data_provenance", {}) or {}),
         # Business approval and deployment activation are separate controls.
         # Approval evidence authorizes the action; connector read-only/shadow
         # settings still decide whether a real SAP write may leave the system.
@@ -464,6 +566,26 @@ def execute_tool(
         routing_key=context.thread_id or context.trace_id or context.user_id,
     )
     audit_base = _audit_base(spec, context, idempotency_key, action_policy)
+
+    specialist_error = _specialist_authorization_error(tool_name, context)
+    if specialist_error:
+        duration_ms = _elapsed_ms(started)
+        audit_event = {
+            **audit_base,
+            "authorized": False,
+            "success": False,
+            "duration_ms": duration_ms,
+            "error": specialist_error,
+        }
+        return ToolExecutionResult(
+            tool_name=tool_name,
+            success=False,
+            error=specialist_error,
+            authorized=False,
+            duration_ms=duration_ms,
+            idempotency_key=idempotency_key,
+            audit_event=audit_event,
+        )
 
     if not action_policy.allowed:
         duration_ms = _elapsed_ms(started)
@@ -526,6 +648,18 @@ def execute_tool(
             audit_event=audit_event,
         )
 
+    delegation, information_flow = _execution_security_decisions(spec, args, context)
+    audit_base["delegation"] = delegation.to_audit_event()
+    audit_base["information_flow"] = information_flow.to_audit_event()
+    if not delegation.allowed:
+        return _blocked_result(
+            tool_name, started, idempotency_key, audit_base, delegation.reason
+        )
+    if not information_flow.allowed:
+        return _blocked_result(
+            tool_name, started, idempotency_key, audit_base, information_flow.reason
+        )
+
     if context.dry_run:
         duration_ms = _elapsed_ms(started)
         audit_event = {
@@ -569,7 +703,11 @@ def execute_tool(
                 raise TimeoutError(
                     f"Tool '{tool_name}' timed out after {spec.timeout_seconds:.1f}s"
                 ) from exc
+            output_error, output_guard = _validate_tool_output(spec, data)
+            if output_error:
+                raise ToolOutputRejected(output_error)
             duration_ms = _elapsed_ms(started)
+            output_provenance = provenance_for_tool_output(data, source=spec.name)
             _record_tool_success(spec)
             audit_event = {
                 **audit_base,
@@ -579,6 +717,8 @@ def execute_tool(
                 "attempts": attempts,
                 "timeout_seconds": spec.timeout_seconds,
                 "retry_limit": spec.retry_limit,
+                "output_guard": output_guard,
+                "output_provenance": output_provenance,
             }
             _log("info", "tool_gateway_executed", audit_event)
             return ToolExecutionResult(
@@ -588,9 +728,12 @@ def execute_tool(
                 duration_ms=duration_ms,
                 idempotency_key=idempotency_key,
                 audit_event=audit_event,
+                output_provenance=output_provenance,
             )
         except Exception as exc:
             last_error = exc
+            if isinstance(exc, ToolOutputRejected):
+                break
             if attempts <= spec.retry_limit:
                 _log(
                     "warning",
@@ -604,7 +747,8 @@ def execute_tool(
                 )
 
     if last_error is not None:
-        _record_tool_failure(spec)
+        if not isinstance(last_error, ToolOutputRejected):
+            _record_tool_failure(spec)
         duration_ms = _elapsed_ms(started)
         audit_event = {
             **audit_base,
@@ -705,6 +849,11 @@ async def execute_tool_async(
         routing_key=context.thread_id or context.trace_id or context.user_id,
     )
     audit_base = _audit_base(spec, context, idempotency_key, action_policy)
+    specialist_error = _specialist_authorization_error(tool_name, context)
+    if specialist_error:
+        return _blocked_result(
+            tool_name, started, idempotency_key, audit_base, specialist_error
+        )
     if not action_policy.allowed:
         return _blocked_result(tool_name, started, idempotency_key, audit_base, action_policy.reason)
     if spec.approval_required and not context.approval_id and not context.dry_run:
@@ -718,6 +867,17 @@ async def execute_tool_async(
     schema_error = _validate_tool_input(spec, args)
     if schema_error:
         return _blocked_result(tool_name, started, idempotency_key, audit_base, schema_error)
+    delegation, information_flow = _execution_security_decisions(spec, args, context)
+    audit_base["delegation"] = delegation.to_audit_event()
+    audit_base["information_flow"] = information_flow.to_audit_event()
+    if not delegation.allowed:
+        return _blocked_result(
+            tool_name, started, idempotency_key, audit_base, delegation.reason
+        )
+    if not information_flow.allowed:
+        return _blocked_result(
+            tool_name, started, idempotency_key, audit_base, information_flow.reason
+        )
     if context.dry_run:
         duration_ms = _elapsed_ms(started)
         audit_event = {
@@ -753,7 +913,11 @@ async def execute_tool_async(
         attempts += 1
         try:
             data = await asyncio.wait_for(_invoke_handler_async(handler, dict(args)), timeout=spec.timeout_seconds)
+            output_error, output_guard = _validate_tool_output(spec, data)
+            if output_error:
+                raise ToolOutputRejected(output_error)
             duration_ms = _elapsed_ms(started)
+            output_provenance = provenance_for_tool_output(data, source=spec.name)
             _record_tool_success(spec)
             audit_event = {
                 **audit_base,
@@ -761,6 +925,8 @@ async def execute_tool_async(
                 "success": True,
                 "duration_ms": duration_ms,
                 "attempts": attempts,
+                "output_guard": output_guard,
+                "output_provenance": output_provenance,
             }
             _log("info", "tool_gateway_async_executed", audit_event)
             return ToolExecutionResult(
@@ -770,14 +936,18 @@ async def execute_tool_async(
                 duration_ms=duration_ms,
                 idempotency_key=idempotency_key,
                 audit_event=audit_event,
+                output_provenance=output_provenance,
             )
         except Exception as exc:
             last_error = exc
+            if isinstance(exc, ToolOutputRejected):
+                break
             if attempts <= spec.retry_limit:
                 await asyncio.sleep(min(0.1 * attempts, 0.5))
 
     duration_ms = _elapsed_ms(started)
-    _record_tool_failure(spec)
+    if not isinstance(last_error, ToolOutputRejected):
+        _record_tool_failure(spec)
     error = str(last_error or "Unknown async tool execution failure.")
     audit_event = {
         **audit_base,
@@ -1002,6 +1172,24 @@ def reset_circuit_breakers() -> None:
         _CIRCUITS.clear()
 
 
+@contextmanager
+def isolated_circuit_breakers():
+    """Run a simulation without leaking circuit state into live execution."""
+
+    with _CIRCUIT_LOCK:
+        previous = {
+            name: _CircuitState(failures=state.failures, opened_at=state.opened_at)
+            for name, state in _CIRCUITS.items()
+        }
+        _CIRCUITS.clear()
+    try:
+        yield
+    finally:
+        with _CIRCUIT_LOCK:
+            _CIRCUITS.clear()
+            _CIRCUITS.update(previous)
+
+
 _JSON_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "string": str,
     "integer": int,
@@ -1043,6 +1231,65 @@ def _validate_tool_input(spec: ToolSpec, args: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _validate_tool_output(
+    spec: ToolSpec,
+    data: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    """Validate untrusted tool data before exposing it to Agent context."""
+
+    schema = spec.output_schema or {}
+    schema_errors: list[str] = []
+    if schema:
+        expected = _JSON_TYPE_MAP.get(str(schema.get("type") or ""))
+        if expected and not isinstance(data, expected):
+            schema_errors.append(
+                f"tool output must be {schema.get('type')}, got {type(data).__name__}"
+            )
+        if isinstance(data, Mapping):
+            for field_name in schema.get("required") or []:
+                if data.get(field_name) is None:
+                    schema_errors.append(f"tool output is missing '{field_name}'")
+
+    flagged: list[dict[str, Any]] = []
+    for path, value in _iter_text_values(data):
+        inspection = inspect_untrusted_text(value)
+        if inspection.flagged:
+            flagged.append(
+                {
+                    "path": path,
+                    "categories": list(inspection.categories),
+                    "handling": inspection.handling,
+                }
+            )
+
+    guard = {
+        "schema_valid": not schema_errors,
+        "instruction_scan": "blocked" if flagged else "clean",
+        "flagged_fields": flagged,
+    }
+    if schema_errors:
+        return "TOOL_OUTPUT_SCHEMA_INVALID: " + "; ".join(schema_errors), guard
+    if flagged:
+        return (
+            "TOOL_OUTPUT_UNTRUSTED_INSTRUCTION: hidden instructions were quarantined",
+            guard,
+        )
+    return None, guard
+
+
+def _iter_text_values(value: Any, path: str = "$"):
+    if isinstance(value, str):
+        yield path, value
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _iter_text_values(item, f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from _iter_text_values(item, f"{path}[{index}]")
+
+
 def _build_idempotency_key(spec: ToolSpec, args: Mapping[str, Any]) -> str | None:
     if not spec.idempotency_fields:
         return None
@@ -1072,6 +1319,7 @@ def _audit_base(
         "scenario": context.scenario,
         "tenant_id": context.tenant_id,
         "approval_id": context.approval_id,
+        "specialist_id": context.specialist_id,
         "dry_run": context.dry_run,
         "idempotency_key": idempotency_key,
         "category": spec.category,
@@ -1081,6 +1329,66 @@ def _audit_base(
         "approval_required": spec.approval_required,
         "policy": action_policy.to_audit_event(),
     }
+
+
+def _execution_security_decisions(
+    spec: ToolSpec,
+    args: Mapping[str, Any],
+    context: ToolExecutionContext,
+) -> tuple[DelegationDecision, InformationFlowDecision]:
+    requires_delegation = bool(
+        settings.agent_delegation_required_for_writes
+        and spec.side_effect in {ToolSideEffect.WRITE, ToolSideEffect.EXTERNAL}
+        and not context.dry_run
+    )
+    delegation = authorize_delegated_tool(
+        context.principal_token,
+        required=requires_delegation,
+        principal_id=context.user_id,
+        principal_role=context.requested_by_role,
+        tenant_id=context.tenant_id,
+        agent_id=context.agent_id,
+        specialist_id=context.specialist_id,
+        tool_name=spec.name,
+        args=args,
+        approval_id=context.approval_id,
+    )
+    required_fields = tuple(spec.input_schema.get("required") or ())
+    information_flow = validate_information_flow(
+        side_effect=spec.side_effect.value,
+        risk_level=spec.risk_level.value,
+        args=args,
+        provenance=context.argument_provenance,
+        required_fields=required_fields,
+        mode=settings.agent_information_flow_mode,
+        dry_run=context.dry_run,
+    )
+    return delegation, information_flow
+
+
+def _specialist_authorization_error(
+    tool_name: str,
+    context: ToolExecutionContext,
+) -> str | None:
+    if not context.specialist_id:
+        return None
+    from app.agent.plan_graph import SPECIALIST_CATALOG
+
+    specialist = SPECIALIST_CATALOG.get(context.specialist_id)
+    if specialist is None:
+        return f"Unknown specialist principal '{context.specialist_id}'"
+    if tool_name not in specialist.allowed_tools:
+        return (
+            f"Specialist '{context.specialist_id}' is not allowed to invoke "
+            f"tool '{tool_name}'"
+        )
+    side_effect = TOOL_SPECS[tool_name].side_effect.value
+    if side_effect not in specialist.allowed_side_effects:
+        return (
+            f"Specialist '{context.specialist_id}' is not allowed to perform "
+            f"'{side_effect}' side effects"
+        )
+    return None
 
 
 def _elapsed_ms(started: float) -> int:

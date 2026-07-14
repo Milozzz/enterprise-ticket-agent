@@ -144,13 +144,26 @@ class Settings(BaseSettings):
     # plan_execute=一次规划顺序执行（更保守）。连续失败达到上限即终止。
     agent_planner_mode: str = "react"
     agent_planner_max_consecutive_failures: int = 2
+    agent_verifier_llm_enabled: bool = False
+    agent_procedural_memory_enabled: bool = True
+    agent_dynamic_plan_enabled: bool = False
+    # Agent identity and information-flow governance.  Audit mode records taint
+    # violations without interrupting legacy demos; production should use
+    # AGENT_INFORMATION_FLOW_MODE=enforce after provenance coverage is verified.
+    agent_delegation_required_for_writes: bool = False
+    agent_delegation_token_minutes: int = 15
+    agent_delegation_default_max_uses: int = 1
+    agent_information_flow_mode: str = "audit"  # off | audit | enforce
+    online_eval_drift_threshold: float = 0.10
+    online_eval_minimum_sample_size: int = 10
+    counterfactual_max_variants: int = 8
     # F4：允许规划器调用 ERP 只读工具（erp_get_order/erp_query_doctype），
     # 用于多步只读诊断（"这笔退款卡在哪"）。只读、走连接器治理路径，默认关闭。
     planner_erp_readonly_enabled: bool = False
     # ── A7: 场景 slot 的 LLM 结构化提取（正则保留为降级路径）────────────
     slot_llm_extraction_enabled: bool = False
     # A7 完整形态：必填 slot 缺失时中断对话追问（一轮），仍缺失按默认值继续
-    slot_clarification_enabled: bool = False
+    slot_clarification_enabled: bool = True
     # H2（长对话优化）：answer 节点单次 LLM 调用携带的最近消息条数上限。
     # 完整历史仍在 checkpointer，只限制进 prompt 的窗口。
     chat_llm_history_window: int = 20
@@ -236,6 +249,14 @@ class Settings(BaseSettings):
         if value.startswith("postgresql://"):
             return "postgresql+asyncpg://" + value.removeprefix("postgresql://")
         return value
+
+    @field_validator("agent_information_flow_mode")
+    @classmethod
+    def validate_information_flow_mode(cls, value: str) -> str:
+        normalized = str(value or "audit").strip().lower()
+        if normalized not in {"off", "audit", "enforce"}:
+            raise ValueError("agent_information_flow_mode must be off, audit or enforce")
+        return normalized
 
 
 def testing_mode_active() -> bool:

@@ -304,7 +304,8 @@ class TestSendNotificationNode:
             result = await send_notification_node(_base_state(refund_success=True))
 
         assert result["notification_sent"] is True
-        assert result["current_step"] == "completed"
+        assert result["current_step"] == "notification_sent"
+        assert result["is_completed"] is False
         ui_types = [e["type"] for e in result["ui_events"]]
         assert "email_preview" in ui_types
 
@@ -316,15 +317,16 @@ class TestSendNotificationNode:
         assert result["current_step"] == "skip_notification"
 
     @pytest.mark.asyncio
-    async def test_notification_failure_does_not_block_completion(self):
+    async def test_notification_failure_blocks_final_completion(self):
         from app.agent.nodes.notification import send_notification_node
 
         with patch("app.agent.nodes.notification.send_notification") as mock_tool:
             mock_tool.invoke.side_effect = Exception("SMTP连接失败")
             result = await send_notification_node(_base_state(refund_success=True))
 
-        assert result.get("is_completed") is True
+        assert result.get("is_completed") is False
         assert result["notification_sent"] is False
+        assert result["current_step"] == "notification_delivery_blocked"
 
 
 class TestPolicyCitationNode:

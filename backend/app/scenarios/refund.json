@@ -24,7 +24,17 @@
     "policy"
   ],
   "allowed_roles": ["USER", "AGENT", "MANAGER"],
-  "tools": ["lookup_order", "check_risk_level", "execute_refund", "send_notification"],
+  "tools": [
+    "lookup_order",
+    "validate_return",
+    "inspect_return_inventory",
+    "check_risk_level",
+    "execute_refund",
+    "restore_return_inventory",
+    "reverse_inventory_movement",
+    "erp_query_doctype",
+    "send_notification"
+  ],
   "policies": ["refund_review"],
   "hitl": {
     "enabled": true,
@@ -36,6 +46,51 @@
         "name": "Manager review",
         "roles": ["MANAGER"],
         "required": true
+      }
+    ]
+  },
+  "runtime": {
+    "schema_version": "3",
+    "engine": "langgraph",
+    "entry_node": "classify_intent",
+    "nodes": [
+      { "id": "classify_intent", "handler": "classify_intent" },
+      { "id": "answer_node", "handler": "answer_node" },
+      { "id": "answer_tools", "handler": "answer_tools" },
+      { "id": "policy_qa_agent", "handler": "policy_qa_specialist" },
+      { "id": "dynamic_dispatch", "handler": "dynamic_plan_dispatch" },
+      { "id": "summarize_session", "handler": "summarize_session" }
+    ],
+    "edges": [
+      { "from": "answer_tools", "to": "answer_node" },
+      { "from": "policy_qa_agent", "to": "$end" },
+      { "from": "summarize_session", "to": "$end" }
+    ],
+    "conditional_edges": [
+      {
+        "from": "classify_intent",
+        "router": "refund_after_classify",
+        "routes": {
+          "dynamic_dispatch": "dynamic_dispatch",
+          "answer_node": "answer_node",
+          "policy_qa_agent": "policy_qa_agent"
+        }
+      },
+      {
+        "from": "answer_node",
+        "router": "answer_after_model",
+        "routes": {
+          "tools": "answer_tools",
+          "summarize": "summarize_session"
+        }
+      },
+      {
+        "from": "dynamic_dispatch",
+        "router": "dynamic_plan_step",
+        "routes": {
+          "dynamic_dispatch": "dynamic_dispatch",
+          "summarize_session": "summarize_session"
+        }
       }
     ]
   }

@@ -7,6 +7,11 @@ import re
 from typing import Any, Iterable, Mapping
 
 from app.agent.generic_runtime import list_runtime_policy_names, list_runtime_tool_names
+from app.agent.scenario_graph_runtime import (
+    END_TOKEN,
+    list_graph_node_handlers,
+    list_graph_routers,
+)
 from app.agent.scenario_registry import ScenarioConfig
 from app.agent.tool_gateway import TOOL_SPECS
 from app.agent.workflow_factory import WORKFLOW_ENTRYPOINTS
@@ -176,19 +181,157 @@ def _validate_runtime(config: ScenarioConfig, issues: list[ScenarioValidationIss
             )
         return
 
-    if str(runtime.get("schema_version") or "") != "2":
+    schema_version = str(runtime.get("schema_version") or "")
+    if schema_version not in {"2", "3"}:
         _error(
             issues,
             "runtime.schema_version.invalid",
             "runtime.schema_version",
-            "Configurable runtime currently supports schema_version '2'.",
+            "Configurable runtime supports schema_version '2' and declarative graph version '3'.",
         )
+        return
+    if schema_version == "3":
+        _validate_graph_runtime(config, runtime, issues)
+        handlers = {
+            str(node.get("handler") or "")
+            for node in runtime.get("nodes") or []
+            if isinstance(node, Mapping)
+        }
+        if "configured_prepare" in handlers:
+            slot_fields = _validate_slot_extraction(runtime, issues)
+            _validate_runtime_tool(config, runtime, slot_fields, issues)
+            _validate_runtime_policy(config, runtime, slot_fields, issues)
+            _validate_runtime_response(runtime, slot_fields, issues)
+            _validate_runtime_ui(config, runtime, slot_fields, issues)
+        return
 
     slot_fields = _validate_slot_extraction(runtime, issues)
     _validate_runtime_tool(config, runtime, slot_fields, issues)
     _validate_runtime_policy(config, runtime, slot_fields, issues)
     _validate_runtime_response(runtime, slot_fields, issues)
     _validate_runtime_ui(config, runtime, slot_fields, issues)
+
+
+def _validate_graph_runtime(
+    config: ScenarioConfig,
+    runtime: Mapping[str, Any],
+    issues: list[ScenarioValidationIssue],
+) -> None:
+    if runtime.get("engine") != "langgraph":
+        _error(
+            issues,
+            "runtime.graph.engine.invalid",
+            "runtime.engine",
+            "Runtime v3 requires engine 'langgraph'.",
+        )
+
+    raw_nodes = runtime.get("nodes")
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        _error(issues, "runtime.graph.nodes.missing", "runtime.nodes", "Graph nodes are required.")
+        return
+
+    node_ids: set[str] = set()
+    handlers = list_graph_node_handlers()
+    for index, node in enumerate(raw_nodes):
+        path = f"runtime.nodes[{index}]"
+        if not isinstance(node, Mapping):
+            _error(issues, "runtime.graph.node.invalid", path, "Graph node must be an object.")
+            continue
+        node_id = str(node.get("id") or "")
+        handler = str(node.get("handler") or "")
+        if not node_id:
+            _error(issues, "runtime.graph.node.id_missing", f"{path}.id", "Node id is required.")
+        elif node_id in node_ids:
+            _error(issues, "runtime.graph.node.duplicate", f"{path}.id", f"Duplicate node id '{node_id}'.")
+        else:
+            node_ids.add(node_id)
+        if handler not in handlers:
+            _error(
+                issues,
+                "runtime.graph.node.handler_unknown",
+                f"{path}.handler",
+                f"Node handler '{handler}' is not in the trusted runtime catalog.",
+            )
+
+    entry = str(runtime.get("entry_node") or "")
+    if entry not in node_ids:
+        _error(
+            issues,
+            "runtime.graph.entry.invalid",
+            "runtime.entry_node",
+            f"Entry node '{entry}' is not declared.",
+        )
+
+    outgoing: set[str] = set()
+    for index, edge in enumerate(runtime.get("edges") or []):
+        path = f"runtime.edges[{index}]"
+        if not isinstance(edge, Mapping):
+            _error(issues, "runtime.graph.edge.invalid", path, "Edge must be an object.")
+            continue
+        source = str(edge.get("from") or "")
+        target = str(edge.get("to") or "")
+        _validate_graph_endpoint(source, node_ids, f"{path}.from", issues, allow_end=False)
+        _validate_graph_endpoint(target, node_ids, f"{path}.to", issues, allow_end=True)
+        if source:
+            outgoing.add(source)
+
+    routers = list_graph_routers()
+    for index, conditional in enumerate(runtime.get("conditional_edges") or []):
+        path = f"runtime.conditional_edges[{index}]"
+        if not isinstance(conditional, Mapping):
+            _error(issues, "runtime.graph.conditional.invalid", path, "Conditional edge must be an object.")
+            continue
+        source = str(conditional.get("from") or "")
+        router = str(conditional.get("router") or "")
+        _validate_graph_endpoint(source, node_ids, f"{path}.from", issues, allow_end=False)
+        if router not in routers:
+            _error(
+                issues,
+                "runtime.graph.router.unknown",
+                f"{path}.router",
+                f"Router '{router}' is not in the trusted runtime catalog.",
+            )
+        routes = conditional.get("routes")
+        if not isinstance(routes, Mapping) or not routes:
+            _error(issues, "runtime.graph.routes.missing", f"{path}.routes", "Router outcomes are required.")
+        else:
+            for outcome, target in routes.items():
+                _validate_graph_endpoint(
+                    str(target),
+                    node_ids,
+                    f"{path}.routes.{outcome}",
+                    issues,
+                    allow_end=True,
+                )
+        if source:
+            outgoing.add(source)
+
+    for node_id in sorted(node_ids - outgoing):
+        _warning(
+            issues,
+            "runtime.graph.node.terminal_implicit",
+            f"runtime.nodes.{node_id}",
+            "Node has no outgoing edge; declare an explicit $end edge for auditability.",
+        )
+
+
+def _validate_graph_endpoint(
+    value: str,
+    node_ids: set[str],
+    path: str,
+    issues: list[ScenarioValidationIssue],
+    *,
+    allow_end: bool,
+) -> None:
+    if allow_end and value == END_TOKEN:
+        return
+    if value not in node_ids:
+        _error(
+            issues,
+            "runtime.graph.endpoint.unknown",
+            path,
+            f"Graph endpoint '{value}' is not a declared node.",
+        )
 
 
 def _validate_slot_extraction(runtime: Mapping[str, Any], issues: list[ScenarioValidationIssue]) -> set[str]:

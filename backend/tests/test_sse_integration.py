@@ -102,6 +102,8 @@ class TestChatSSEProtocol:
 
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
+        assert response.headers.get("x-accel-buffering") == "no"
+        assert "no-transform" in response.headers.get("cache-control", "")
 
         events = _parse_sse(response.text)
         event_types = [e.get("event") for e in events]
@@ -165,38 +167,65 @@ class TestChatSSEProtocol:
 class TestResumeEndpoint:
     @pytest.mark.asyncio
     async def test_resume_rejects_user_role(self, client):
-        response = await client.post("/api/agent/resume", json={
-            "thread_id": "test-thread",
-            "action": "approve",
-            "reviewer_role": "USER",
-            "reviewer_id": "user_001",
-            "comment": "",
-        })
+        from app.core.auth import get_current_user
+        from app.main import app
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user_001", "role": "USER", "tenant_id": "default"
+        }
+        try:
+            response = await client.post("/api/agent/resume", json={
+                "thread_id": "test-thread",
+                "action": "approve",
+                "reviewer_role": "MANAGER",
+                "reviewer_id": "forged-manager",
+                "comment": "",
+            })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
         assert response.status_code == 403
 
     @pytest.mark.asyncio
     async def test_resume_rejects_agent_role(self, client):
-        response = await client.post("/api/agent/resume", json={
-            "thread_id": "test-thread",
-            "action": "approve",
-            "reviewer_role": "AGENT",
-            "reviewer_id": "agent_001",
-            "comment": "",
-        })
+        from app.core.auth import get_current_user
+        from app.main import app
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "agent_001", "role": "AGENT", "tenant_id": "default"
+        }
+        try:
+            response = await client.post("/api/agent/resume", json={
+                "thread_id": "test-thread",
+                "action": "approve",
+                "reviewer_role": "MANAGER",
+                "reviewer_id": "forged-manager",
+                "comment": "",
+            })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
         assert response.status_code == 403
 
     @pytest.mark.asyncio
     async def test_resume_accepts_manager_role(self, client):
         """MANAGER 调用 /resume 应返回 200 流式响应（即使 thread 不存在）"""
-        with patch("app.api.routes.chat.effective_simulate_database_down", return_value=False), \
-             patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock):
-            response = await client.post("/api/agent/resume", json={
-                "thread_id": "nonexistent-thread-xyz",
-                "action": "approve",
-                "reviewer_role": "MANAGER",
-                "reviewer_id": "manager_001",
-                "comment": "已审核",
-            })
+        from app.core.auth import get_current_user
+        from app.main import app
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "manager_001", "role": "MANAGER", "tenant_id": "default"
+        }
+        try:
+            with patch("app.api.routes.chat.effective_simulate_database_down", return_value=False), \
+                 patch("app.api.routes.chat._add_audit_log", new_callable=AsyncMock):
+                response = await client.post("/api/agent/resume", json={
+                    "thread_id": "nonexistent-thread-xyz",
+                    "action": "approve",
+                    "reviewer_role": "USER",
+                    "reviewer_id": "forged-user",
+                    "comment": "已审核",
+                })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
         assert response.status_code == 200
 
 

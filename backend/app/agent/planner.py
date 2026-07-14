@@ -14,6 +14,8 @@ LLM 只能在白名单工具内提议顺序与参数，不能绕过任何治理�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+from time import perf_counter
 from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
@@ -25,6 +27,7 @@ from app.agent.tool_gateway import (
     execute_erp_connector_tool_async,
     execute_tool,
     gateway_context_from_state,
+    ToolSideEffect,
 )
 from app.agent.utils import get_state_val
 from app.core.config import get_settings
@@ -84,6 +87,7 @@ class PlanExecution:
     aborted_reason: str | None = None
     mode: str = "plan_execute"
     react_trace: list[dict[str, Any]] = field(default_factory=list)
+    budget: dict[str, Any] = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
@@ -304,6 +308,7 @@ async def react_execute(
     allowed_tools: set[str],
     handlers: Mapping[str, Any],
     dry_run: bool = False,
+    planner_config: Mapping[str, Any] | None = None,
 ) -> PlanExecution:
     """A4 完整形态：ReAct 步间重规划——执行一步、观察结果、再决定下一步。
 
@@ -312,16 +317,42 @@ async def react_execute(
     （调用方回静态序列），已产生结果则带 aborted_reason 终止。
     """
     settings = get_settings()
-    max_steps = max(1, int(settings.agent_planner_max_steps))
-    max_consecutive_failures = max(
-        1, int(getattr(settings, "agent_planner_max_consecutive_failures", 2))
+    config = dict(planner_config or {})
+    max_steps = max(
+        1,
+        min(12, int(config.get("max_steps") or settings.agent_planner_max_steps)),
     )
+    max_consecutive_failures = max(
+        1,
+        int(
+            config.get("max_consecutive_failures")
+            or getattr(settings, "agent_planner_max_consecutive_failures", 2)
+        ),
+    )
+    deadline_ms = max(100, int(config.get("deadline_ms") or 8000))
     # ERP 只读工具无需本地 handler（走 async 连接器路径），单独并入可用集合
-    effective_tools = (allowed_tools & set(handlers)) | (allowed_tools & ERP_READONLY_TOOLS)
-    execution = PlanExecution(plan=None, mode="react")
+    effective_tools = _bounded_tools(
+        (allowed_tools & set(handlers)) | (allowed_tools & ERP_READONLY_TOOLS),
+        config,
+    )
+    execution = PlanExecution(
+        plan=None,
+        mode="react",
+        budget={
+            "max_steps": max_steps,
+            "deadline_ms": deadline_ms,
+            "allowed_side_effects": sorted(_allowed_side_effects(config)),
+        },
+    )
     consecutive_failures = 0
+    started = perf_counter()
+    seen_calls: set[str] = set()
 
     for step_no in range(max_steps):
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        if elapsed_ms >= deadline_ms:
+            execution.aborted_reason = f"Planner deadline {deadline_ms} ms exceeded"
+            break
         decision = await _react_decide(
             goal=goal,
             slots=slots,
@@ -354,6 +385,24 @@ async def react_execute(
                 "react_step_rejected", scenario=scenario_id, reason=invalid
             )
             break
+
+        call_signature = json.dumps(
+            {"tool": decision.tool, "args": decision.args},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if call_signature in seen_calls:
+            execution.aborted_reason = (
+                f"检测到重复工具调用，终止循环: {decision.tool}"
+            )
+            logger.warning(
+                "react_duplicate_call_blocked",
+                scenario=scenario_id,
+                tool=decision.tool,
+            )
+            break
+        seen_calls.add(call_signature)
 
         result = await _execute_planned_tool(
             decision.tool,
@@ -407,6 +456,7 @@ async def plan_and_execute(
     allowed_tools: set[str],
     handlers: Mapping[str, Any],
     dry_run: bool = False,
+    planner_config: Mapping[str, Any] | None = None,
 ) -> PlanExecution:
     """规划并执行工具序列。任何环节失败都不抛异常，让调用方走静态降级路径。
 
@@ -416,10 +466,12 @@ async def plan_and_execute(
     两种模式下每步都经 execute_tool 完整治理（权限/schema 校验/熔断/幂等/审计）。
     """
     settings = get_settings()
+    config = dict(planner_config or {})
     if not settings.agent_planner_enabled:
         return PlanExecution(plan=None)
 
-    if str(getattr(settings, "agent_planner_mode", "react")).lower() == "react":
+    mode = str(config.get("mode") or getattr(settings, "agent_planner_mode", "react")).lower()
+    if mode == "react":
         return await react_execute(
             state,
             scenario_id=scenario_id,
@@ -428,12 +480,21 @@ async def plan_and_execute(
             allowed_tools=allowed_tools,
             handlers=handlers,
             dry_run=dry_run,
+            planner_config=config,
         )
 
-    max_steps = max(1, int(settings.agent_planner_max_steps))
+    max_steps = max(
+        1,
+        min(12, int(config.get("max_steps") or settings.agent_planner_max_steps)),
+    )
+    deadline_ms = max(100, int(config.get("deadline_ms") or 8000))
+    started = perf_counter()
     # 只允许"场景白名单 ∩ 已注册 handler"的工具
     # ERP 只读工具无需本地 handler（走 async 连接器路径），单独并入可用集合
-    effective_tools = (allowed_tools & set(handlers)) | (allowed_tools & ERP_READONLY_TOOLS)
+    effective_tools = _bounded_tools(
+        (allowed_tools & set(handlers)) | (allowed_tools & ERP_READONLY_TOOLS),
+        config,
+    )
     plan = await plan_tools(
         goal=goal,
         slots=slots,
@@ -458,8 +519,20 @@ async def plan_and_execute(
         goal_understanding=plan.goal_understanding,
     )
 
-    execution = PlanExecution(plan=plan, used_planner=True)
+    execution = PlanExecution(
+        plan=plan,
+        used_planner=True,
+        mode="plan_execute",
+        budget={
+            "max_steps": max_steps,
+            "deadline_ms": deadline_ms,
+            "allowed_side_effects": sorted(_allowed_side_effects(config)),
+        },
+    )
     for index, step in enumerate(plan.steps):
+        if int((perf_counter() - started) * 1000) >= deadline_ms:
+            execution.aborted_reason = f"Planner deadline {deadline_ms} ms exceeded"
+            break
         result = await _execute_planned_tool(
             step.tool,
             dict(step.args),
@@ -483,3 +556,19 @@ async def plan_and_execute(
             )
             break
     return execution
+
+
+def _allowed_side_effects(config: Mapping[str, Any]) -> set[str]:
+    configured = config.get("allowed_side_effects")
+    if isinstance(configured, list) and configured:
+        return {str(item).lower() for item in configured}
+    return {ToolSideEffect.READ.value, ToolSideEffect.DECISION.value}
+
+
+def _bounded_tools(tool_names: set[str], config: Mapping[str, Any]) -> set[str]:
+    allowed_effects = _allowed_side_effects(config)
+    return {
+        name
+        for name in tool_names
+        if name in TOOL_SPECS and TOOL_SPECS[name].side_effect.value in allowed_effects
+    }

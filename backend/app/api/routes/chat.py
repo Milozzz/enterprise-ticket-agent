@@ -10,11 +10,13 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.graph import ticket_graph
+from app.agent.delegation import consume_persisted_delegation, serialize_delegation
 from app.core.auth import get_current_user, get_optional_user
 from app.core.config import effective_simulate_database_down, get_settings
 from app.core.logging import get_logger
 from app.core.observability import get_langfuse_callback
 from app.db.tenant_context import current_tenant_id, tenant_scope
+from app.db.database import AsyncSessionLocal
 from app.models.ticket import ChatRequest, ResumeRequest
 from app.services.approval_resume import (
     direct_db_approve as _direct_db_approve,
@@ -58,7 +60,11 @@ async def _tenant_scoped_stream(stream, tenant_id: str):
 
 
 def _stream_response(stream, *, thread_id: str | None = None, trace_id: str | None = None, cache_hit=False):
-    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive"}
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
     if thread_id:
         headers["X-Thread-Id"] = thread_id
     if trace_id:
@@ -84,8 +90,25 @@ async def chat_with_agent(
     tenant_id = str((jwt_user or {}).get("tenant_id") or current_tenant_id())
     settings = get_settings()
     cache_key = _chat_cache_key(effective_user_id, user_message)
+    delegation_grant: dict = {}
 
-    cached = await _redis_get(cache_key)
+    if request.delegation_token:
+        try:
+            async with AsyncSessionLocal() as delegation_session:
+                grant = await consume_persisted_delegation(
+                    delegation_session,
+                    request.delegation_token,
+                    principal_id=effective_user_id,
+                    tenant_id=tenant_id,
+                )
+                delegation_grant = serialize_delegation(grant)
+                await delegation_session.commit()
+        except Exception as exc:
+            raise HTTPException(status_code=403, detail=f"Delegation rejected: {exc}") from exc
+
+    # Delegated tasks are authority-specific and must never reuse another
+    # execution's cached result.
+    cached = None if request.delegation_token else await _redis_get(cache_key)
     if cached:
         try:
             chunks = json.loads(cached)
@@ -145,6 +168,11 @@ async def chat_with_agent(
         "thread_id": thread_id,
         "trace_id": trace_id,
         "tenant_id": tenant_id,
+        "agent_id": "enterprise-ticket-agent",
+        "delegation_token": request.delegation_token or "",
+        "delegation_grant": delegation_grant,
+        "data_provenance": {},
+        "information_flow_events": [],
         "ui_events": [],
     }
 

@@ -45,7 +45,33 @@
     ]
   },
   "runtime": {
-    "schema_version": "2",
+    "schema_version": "3",
+    "engine": "langgraph",
+    "entry_node": "prepare_request",
+    "nodes": [
+      { "id": "prepare_request", "handler": "configured_prepare" },
+      { "id": "human_review", "handler": "generic_human_review" },
+      { "id": "finalize_request", "handler": "generic_finalize", "plan_step": "approve" }
+    ],
+    "edges": [
+      { "from": "finalize_request", "to": "$end" }
+    ],
+    "conditional_edges": [
+      {
+        "from": "prepare_request",
+        "router": "generic_after_prepare",
+        "routes": { "review": "human_review", "finalize": "finalize_request" }
+      },
+      {
+        "from": "human_review",
+        "router": "generic_after_review",
+        "routes": {
+          "review": "human_review",
+          "finalize": "finalize_request",
+          "end": "$end"
+        }
+      }
+    ],
     "approval_type": "reimbursement",
     "current_step": "reimbursement_done",
     "slot_extraction": {
@@ -53,23 +79,29 @@
         "amount": {
           "type": "amount",
           "default": 0,
+          "required": true,
+          "label": "报销金额",
+          "prompt": "请补充报销金额和币种。",
           "regex": "(?:¥|￥)?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:元|块|rmb|cny)?"
         },
         "category": {
           "type": "keyword_map",
           "default": "general",
+          "label": "费用类别",
           "patterns": [
             { "value": "travel", "keywords": ["差旅", "出差", "机票", "火车", "travel"] },
             { "value": "hotel", "keywords": ["住宿", "酒店", "hotel"] },
             { "value": "taxi", "keywords": ["打车", "出租", "网约车", "taxi"] },
             { "value": "meal", "keywords": ["餐", "饭", "meal"] },
             { "value": "office", "keywords": ["办公", "耗材", "office"] },
-            { "value": "entertainment", "keywords": ["招待", "客户接待", "entertainment"] }
+            { "value": "entertainment", "keywords": ["招待", "客户接待", "接待客户", "entertainment"] }
           ]
         },
         "description": {
           "type": "message_excerpt",
           "max_length": 500,
+          "required": true,
+          "label": "费用说明",
           "default": "No description provided."
         }
       }

@@ -105,6 +105,30 @@ async def classify_intent_node(state: AgentState) -> dict:
         },
     }
 
+    supervisor_decision = get_state_val(state, "supervisor_decision", {}) or {}
+    if supervisor_decision.get("classification_prefilled") and get_state_val(state, "intent"):
+        intent = str(get_state_val(state, "intent", "other"))
+        order_id = str(get_state_val(state, "order_id", "") or "")
+        ui_event["data"]["steps"][0].update(
+            {
+                "status": "done",
+                "detail": (
+                    f"复用 Supervisor 快速识别：{intent}"
+                    + (f"，订单号 {order_id}" if order_id else "")
+                ),
+            }
+        )
+        logger.info(
+            "intent_classification_reused",
+            intent=intent,
+            order_id=order_id,
+            method="supervisor_rules_fast_path",
+        )
+        return {
+            "current_step": "classify_intent_done",
+            "ui_events": [ui_event],
+        }
+
     # 获取用户最新消息
     messages = get_state_val(state, "messages", [])
     user_message = ""
@@ -126,10 +150,10 @@ async def classify_intent_node(state: AgentState) -> dict:
     # 调试：打印用户消息
     logger.info("processing_user_message", content=user_message)
 
+    fast_path = classify_intent_fast_path(user_message)
     rule_parsed = _rule_classify(user_message)
-    if _is_high_confidence_rule_match(rule_parsed):
-        parsed = rule_parsed
-        parsed["_method"] = "rules_fast_path"
+    if fast_path is not None:
+        parsed = fast_path
     else:
         try:
             # 优先尝试 LLM 解析
@@ -267,6 +291,15 @@ def _is_high_confidence_rule_match(parsed: dict) -> bool:
     if reason != "other" and order_id:
         return True
     return False
+
+
+def classify_intent_fast_path(user_message: str) -> dict | None:
+    """Return a deterministic classification only when the rule signal is strong."""
+    parsed = _rule_classify(user_message)
+    if not _is_high_confidence_rule_match(parsed):
+        return None
+    parsed["_method"] = "rules_fast_path"
+    return parsed
 
 
 def _rule_classify(user_message: str) -> dict:

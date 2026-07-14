@@ -27,6 +27,26 @@
       "allowed_roles": ["USER", "AGENT", "MANAGER"],
       "risk_level": "medium"
     },
+    "validate_return": {
+      "description": "Validate return authorization and inspection evidence.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE", "AUDITOR"],
+      "risk_level": "medium"
+    },
+    "inspect_return_inventory": {
+      "description": "Read return inventory and warehouse consistency.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE", "AUDITOR"],
+      "risk_level": "low"
+    },
+    "restore_return_inventory": {
+      "description": "Restore or quarantine inventory after approved refund execution.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE"],
+      "risk_level": "high"
+    },
+    "reverse_inventory_movement": {
+      "description": "Compensate a return inventory movement.",
+      "allowed_roles": ["AGENT", "MANAGER", "FINANCE"],
+      "risk_level": "high"
+    },
     "send_notification": {
       "description": "Notify finance or operations after refund execution.",
       "allowed_roles": ["AGENT", "MANAGER"],

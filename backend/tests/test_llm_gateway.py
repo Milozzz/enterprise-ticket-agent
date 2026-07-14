@@ -8,7 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import LLMUsageRecord
-from app.llm.gateway import LLMCallContext, LLMGateway, ModelCandidate
+from app.llm.gateway import (
+    LLMCallContext,
+    LLMGateway,
+    LLMTaskBudgetExceeded,
+    ModelCandidate,
+)
+from app.llm.task_budget import use_task_budget
 
 
 class Classification(BaseModel):
@@ -112,3 +118,25 @@ async def test_gateway_uses_provider_neutral_structured_output(monkeypatch, usag
     assert isinstance(result.output, Classification)
     assert result.output.intent == "refund"
     assert result.provider == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_gateway_enforces_per_task_call_budget(monkeypatch, usage_session_factory):
+    from app.llm import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module.settings, "openai_api_key", "test-openai")
+    gateway = LLMGateway(
+        model_factory=lambda provider, model, temperature: FakeModel(),
+        session_factory=usage_session_factory,
+    )
+    gateway._routes = {"budgeted": [ModelCandidate("openai", "gpt-4o-mini")]}
+    context = LLMCallContext(
+        thread_id="thread-budget",
+        trace_id="trace-budget",
+        tenant_id="default",
+    )
+
+    with use_task_budget(max_calls=1, max_cost_usd="1"):
+        await gateway.ainvoke("budgeted", ["first"], context=context)
+        with pytest.raises(LLMTaskBudgetExceeded, match="call budget exhausted"):
+            await gateway.ainvoke("budgeted", ["second"], context=context)

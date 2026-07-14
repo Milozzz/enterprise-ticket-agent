@@ -124,6 +124,29 @@ def evaluate_refund_review_policy(
     routing_key: str = "global",
 ) -> PolicyDecision:
     policy, variant, bucket = select_policy(routing_key)
+    return evaluate_refund_review_policy_document(
+        policy,
+        amount=amount,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        user_history=user_history,
+        policy_variant=variant,
+        rollout_bucket=bucket,
+    )
+
+
+def evaluate_refund_review_policy_document(
+    policy: Mapping[str, Any],
+    *,
+    amount: float,
+    risk_score: int,
+    risk_level: str,
+    user_history: Mapping[str, Any] | None = None,
+    policy_variant: str = "counterfactual",
+    rollout_bucket: int = 0,
+) -> PolicyDecision:
+    """Evaluate an explicit policy document without changing live rollout state."""
+
     version = str(policy.get("version", "unknown"))
     attributes = {
         "amount": float(amount or 0),
@@ -145,8 +168,8 @@ def evaluate_refund_review_policy(
             requires_human_review=True,
             matched_rules=tuple(matched),
             reason="Refund review policy requires HITL.",
-            policy_variant=variant,
-            rollout_bucket=bucket,
+            policy_variant=policy_variant,
+            rollout_bucket=rollout_bucket,
         )
 
     return PolicyDecision(
@@ -156,8 +179,8 @@ def evaluate_refund_review_policy(
         requires_human_review=False,
         matched_rules=(),
         reason="No refund review policy rule matched.",
-        policy_variant=variant,
-        rollout_bucket=bucket,
+        policy_variant=policy_variant,
+        rollout_bucket=rollout_bucket,
     )
 
 
@@ -168,6 +191,23 @@ def evaluate_permission_request_policy(
     routing_key: str = "global",
 ) -> PolicyDecision:
     policy, variant, bucket = select_policy(routing_key)
+    return evaluate_permission_request_policy_document(
+        policy,
+        system=system,
+        permission_level=permission_level,
+        policy_variant=variant,
+        rollout_bucket=bucket,
+    )
+
+
+def evaluate_permission_request_policy_document(
+    policy: Mapping[str, Any],
+    *,
+    system: str,
+    permission_level: str,
+    policy_variant: str = "counterfactual",
+    rollout_bucket: int = 0,
+) -> PolicyDecision:
     version = str(policy.get("version", "unknown"))
     attributes = {
         "system": _normalize_text(system),
@@ -187,8 +227,8 @@ def evaluate_permission_request_policy(
             requires_human_review=True,
             matched_rules=tuple(matched),
             reason="Permission request policy requires HITL.",
-            policy_variant=variant,
-            rollout_bucket=bucket,
+            policy_variant=policy_variant,
+            rollout_bucket=rollout_bucket,
         )
 
     return PolicyDecision(
@@ -198,8 +238,8 @@ def evaluate_permission_request_policy(
         requires_human_review=False,
         matched_rules=(),
         reason="No permission request policy rule matched.",
-        policy_variant=variant,
-        rollout_bucket=bucket,
+        policy_variant=policy_variant,
+        rollout_bucket=rollout_bucket,
     )
 
 
@@ -210,6 +250,23 @@ def evaluate_reimbursement_policy(
     routing_key: str = "global",
 ) -> PolicyDecision:
     policy, variant, bucket = select_policy(routing_key)
+    return evaluate_reimbursement_policy_document(
+        policy,
+        amount=amount,
+        category=category,
+        policy_variant=variant,
+        rollout_bucket=bucket,
+    )
+
+
+def evaluate_reimbursement_policy_document(
+    policy: Mapping[str, Any],
+    *,
+    amount: float,
+    category: str,
+    policy_variant: str = "counterfactual",
+    rollout_bucket: int = 0,
+) -> PolicyDecision:
     version = str(policy.get("version", "unknown"))
     attributes = {
         "amount": float(amount or 0),
@@ -229,8 +286,8 @@ def evaluate_reimbursement_policy(
             requires_human_review=True,
             matched_rules=tuple(matched),
             reason="Reimbursement policy requires HITL.",
-            policy_variant=variant,
-            rollout_bucket=bucket,
+            policy_variant=policy_variant,
+            rollout_bucket=rollout_bucket,
         )
 
     return PolicyDecision(
@@ -240,8 +297,8 @@ def evaluate_reimbursement_policy(
         requires_human_review=False,
         matched_rules=(),
         reason="No reimbursement policy rule matched.",
-        policy_variant=variant,
-        rollout_bucket=bucket,
+        policy_variant=policy_variant,
+        rollout_bucket=rollout_bucket,
     )
 
 

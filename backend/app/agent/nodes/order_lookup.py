@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.agent.state import AgentState
+from app.agent.task_spec import enrich_task_spec_from_state
 from app.agent.utils import get_state_val
 from app.agent.tool_gateway import (
     execute_erp_connector_tool_async,
@@ -86,7 +87,12 @@ def _normalize_connector_order(
 
 
 async def _lookup_order(state: AgentState, order_id: str):
-    context = gateway_context_from_state(state, actor_role="AGENT", scenario="refund")
+    context = gateway_context_from_state(
+        state,
+        actor_role="AGENT",
+        scenario="refund",
+        specialist_id="operations_specialist",
+    )
     connector_id = _selected_connector_id(state)
     tenant_id = context.tenant_id
 
@@ -216,6 +222,16 @@ async def lookup_order_node(state: AgentState) -> dict:
         )
         canonical_order_id = order_data.get("canonicalId", order_id)
 
+        discovered_state = {
+            **dict(state),
+            "order_id": canonical_order_id,
+            "order_detail": order_data,
+            "open_item_id": str(
+                open_item.get("open_item_id")
+                or open_item.get("openItemId")
+                or f"OI-AR-{canonical_order_id}"
+            ),
+        }
         return {
             "order_id": canonical_order_id,
             "order_detail": order_data,
@@ -227,6 +243,9 @@ async def lookup_order_node(state: AgentState) -> dict:
                 or f"OI-AR-{canonical_order_id}"
             ),
             "connector_id": connector_id,
+            "task_spec": enrich_task_spec_from_state(
+                get_state_val(state, "task_spec", {}) or {}, discovered_state
+            ),
             "user_id": order_data.get("userId", get_state_val(state, "user_id", "unknown")),
             "current_step": "lookup_order_done",
             "tool_gateway_events": audit_events,

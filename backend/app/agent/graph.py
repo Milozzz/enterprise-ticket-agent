@@ -6,7 +6,6 @@ import os
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
-from langgraph.prebuilt import ToolNode
 
 try:
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -23,22 +22,20 @@ except ImportError:
     _REDIS_CP_AVAILABLE = False
 
 from app.agent.generic_runtime import run_configured_scenario
-from app.agent.nodes.answer import ANSWER_TOOLS, answer_node, route_answer
-from app.agent.nodes.classifier import classify_intent_node
 from app.agent.nodes.generic_approval import (
     finalize_business_request_node,
     generic_human_review_node,
     route_after_generic_prepare,
     route_after_generic_review,
 )
-from app.agent.nodes.human_review import human_review_node, should_continue_after_review
-from app.agent.nodes.notification import send_notification_node
-from app.agent.nodes.order_lookup import lookup_order_node
-from app.agent.nodes.refund import execute_refund_node
-from app.agent.nodes.summarize import summarize_session_node
 from app.agent.nodes.supervisor import supervisor_router_node
-from app.agent.subgraphs import build_policy_qa_agent, build_risk_agent
-from app.agent.scenario_registry import get_default_registry
+from app.agent.nodes.task_understanding import task_understanding_node
+from app.agent.execution_governance import (
+    bootstrap_execution_budget_node,
+    budgeted_node,
+)
+from app.agent.scenario_graph_runtime import build_declarative_scenario_graph
+from app.agent.scenario_registry import ScenarioConfig, get_default_registry
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
 from app.core.config import get_settings
@@ -46,95 +43,6 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
-
-
-def route_after_classify(state: AgentState) -> str:
-    intent = get_state_val(state, "intent", "other")
-    logger.info("intent_routing", intent=intent, order_id=get_state_val(state, "order_id"))
-    if intent == "refund":
-        return "lookup_order"
-    if intent == "query_policy":
-        return "answer_policy_node"
-    return "answer_node"
-
-
-def route_after_lookup(state: AgentState) -> str:
-    step = get_state_val(state, "current_step", "")
-    if "error" in step or not get_state_val(state, "order_amount"):
-        logger.info("lookup_failed_stopping", step=step)
-        return "end"
-    return "parallel_risk"
-
-
-def route_after_risk(state: AgentState) -> str:
-    user_history = get_state_val(state, "user_history") or {}
-    if user_history.get("has_fraud_flag"):
-        logger.info("risk_routing", decision="human_review_fraud_flag")
-        return "human_review"
-    if get_state_val(state, "requires_human_approval", False):
-        logger.info(
-            "risk_routing",
-            decision="human_review",
-            risk_score=get_state_val(state, "risk_score"),
-        )
-        return "human_review"
-    logger.info(
-        "risk_routing",
-        decision="auto_approve",
-        risk_score=get_state_val(state, "risk_score"),
-    )
-    return "execute_refund"
-
-
-def _build_refund_subgraph():
-    builder = StateGraph(AgentState)
-    builder.add_node("classify_intent", classify_intent_node)
-    builder.add_node("answer_node", answer_node)
-    builder.add_node("answer_tools", ToolNode(tools=ANSWER_TOOLS))
-    builder.add_node("policy_qa_agent", build_policy_qa_agent())
-    builder.add_node("lookup_order", lookup_order_node)
-    builder.add_node("risk_agent", build_risk_agent())
-    builder.add_node("human_review", human_review_node)
-    builder.add_node("execute_refund", execute_refund_node)
-    builder.add_node("send_notification", send_notification_node)
-    builder.add_node("summarize_session", summarize_session_node)
-    builder.set_entry_point("classify_intent")
-
-    builder.add_conditional_edges(
-        "classify_intent",
-        route_after_classify,
-        {
-            "lookup_order": "lookup_order",
-            "answer_node": "answer_node",
-            "answer_policy_node": "policy_qa_agent",
-        },
-    )
-    builder.add_conditional_edges(
-        "answer_node",
-        route_answer,
-        {"tools": "answer_tools", "summarize": "summarize_session"},
-    )
-    builder.add_edge("answer_tools", "answer_node")
-    builder.add_edge("policy_qa_agent", END)
-    builder.add_edge("summarize_session", END)
-    builder.add_conditional_edges(
-        "lookup_order",
-        route_after_lookup,
-        {"parallel_risk": "risk_agent", "end": "summarize_session"},
-    )
-    builder.add_conditional_edges(
-        "risk_agent",
-        route_after_risk,
-        {"human_review": "human_review", "execute_refund": "execute_refund"},
-    )
-    builder.add_conditional_edges(
-        "human_review",
-        should_continue_after_review,
-        {"execute_refund": "execute_refund", "end": "summarize_session"},
-    )
-    builder.add_edge("execute_refund", "send_notification")
-    builder.add_edge("send_notification", "summarize_session")
-    return builder.compile()
 
 
 def _configured_scenario_runner(scenario_id: str):
@@ -169,21 +77,29 @@ def _build_configured_subgraph(scenario_id: str):
     return builder.compile()
 
 
+def build_scenario_subgraph(scenario: ScenarioConfig):
+    """Build a scenario child graph solely from its declared runtime contract."""
+    runtime = dict(scenario.runtime or {})
+    if str(runtime.get("schema_version")) == "3":
+        return build_declarative_scenario_graph(scenario)
+    return _build_configured_subgraph(scenario.id)
+
+
 def build_graph(checkpointer=None):
     """Build the root graph; active scenarios become independently resumable children."""
     builder = StateGraph(AgentState)
-    builder.add_node("supervisor_router", supervisor_router_node)
-    builder.set_entry_point("supervisor_router")
+    builder.add_node("budget_bootstrap", bootstrap_execution_budget_node)
+    builder.add_node("supervisor_router", budgeted_node(supervisor_router_node))
+    builder.add_node("task_understanding", budgeted_node(task_understanding_node))
+    builder.set_entry_point("budget_bootstrap")
+    builder.add_edge("budget_bootstrap", "supervisor_router")
+    builder.add_edge("supervisor_router", "task_understanding")
 
     scenario_routes: dict[str, str] = {}
     for scenario in get_default_registry().list():
         if scenario.status != "active":
             continue
-        subgraph = (
-            _build_refund_subgraph()
-            if scenario.id == "refund"
-            else _build_configured_subgraph(scenario.id)
-        )
+        subgraph = build_scenario_subgraph(scenario)
         builder.add_node(scenario.id, subgraph)
         builder.add_edge(scenario.id, END)
         scenario_routes[scenario.id] = scenario.id
@@ -192,7 +108,7 @@ def build_graph(checkpointer=None):
         scenario_id = str(get_state_val(state, "scenario_id", "refund"))
         return get_default_registry().get(scenario_id).id
 
-    builder.add_conditional_edges("supervisor_router", route_to_subgraph, scenario_routes)
+    builder.add_conditional_edges("task_understanding", route_to_subgraph, scenario_routes)
     compile_kwargs = {"checkpointer": checkpointer} if checkpointer else {}
     return builder.compile(**compile_kwargs)
 

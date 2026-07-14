@@ -105,7 +105,7 @@ class TestRateLimiting:
     def test_rate_limit_skips_non_target_paths(self):
         """不在限流路径上的请求不受限制"""
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
         from app.core.rate_limit import RateLimitMiddleware, _RATE_LIMITED_PREFIXES
 
         assert "/health" not in str(_RATE_LIMITED_PREFIXES)

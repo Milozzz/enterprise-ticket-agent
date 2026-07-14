@@ -3,16 +3,34 @@ import asyncio
 from langchain_core.messages import HumanMessage
 
 from app.agent.generic_runtime import extract_slots, run_configured_scenario
+from app.agent.graph import build_scenario_subgraph
 from app.agent.scenario_registry import get_default_registry
+from app.agent.scenario_validation import validate_scenario_config
 
 
 def test_permission_runtime_config_declares_core_contract():
     scenario = get_default_registry().get("permission_request")
 
-    assert scenario.runtime["schema_version"] == "2"
+    assert scenario.runtime["schema_version"] == "3"
+    assert scenario.runtime["engine"] == "langgraph"
+    assert scenario.runtime["entry_node"] == "prepare_request"
     assert scenario.runtime["tool"]["name"] == "create_permission_request"
     assert scenario.runtime["policy"]["name"] == "permission_request_review"
     assert "business_request_card" in scenario.runtime["ui"]
+
+
+def test_refund_runtime_v3_compiles_from_declarative_topology():
+    scenario = get_default_registry().get("refund")
+
+    assert scenario.runtime["schema_version"] == "3"
+    assert scenario.runtime["engine"] == "langgraph"
+    assert scenario.runtime["entry_node"] == "classify_intent"
+    assert validate_scenario_config(scenario).valid is True
+
+    graph = build_scenario_subgraph(scenario).get_graph()
+    assert "classify_intent" in graph.nodes
+    assert "dynamic_dispatch" in graph.nodes
+    assert "summarize_session" in graph.nodes
 
 
 def test_runtime_slot_extraction_uses_configured_keywords():

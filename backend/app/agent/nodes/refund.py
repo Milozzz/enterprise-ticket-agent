@@ -9,6 +9,8 @@ import uuid
 from sqlalchemy import select
 
 from app.agent.state import AgentState
+from app.agent.evidence_graph import collect_refund_evidence
+from app.agent.plan_graph import mark_plan_steps
 from app.agent.tool_gateway import gateway_context_from_state
 from app.agent.utils import get_state_val
 from app.core.logging import get_logger
@@ -167,6 +169,7 @@ async def execute_refund_node(state: AgentState) -> dict:
                 state,
                 actor_role="AGENT",
                 scenario="refund_finance",
+                specialist_id="executor",
             ),
         )
     except Exception as exc:
@@ -241,4 +244,13 @@ async def execute_refund_node(state: AgentState) -> dict:
     if not success:
         result["error_message"] = result["refund_message"]
         result["is_completed"] = True
+    merged_state = {**dict(state), **result}
+    result["evidence_graph"] = collect_refund_evidence(merged_state)
+    result["plan_graph"] = mark_plan_steps(
+        get_state_val(state, "plan_graph", {}) or {},
+        {
+            "execute_finance": "completed" if success else "blocked",
+        },
+        graph_status="running" if success else "blocked",
+    )
     return result

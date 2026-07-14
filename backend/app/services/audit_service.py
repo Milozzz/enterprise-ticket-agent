@@ -80,6 +80,8 @@ async def replay_audit_logs(thread_id: str) -> dict:
         "requires_human_approval", "human_decision", "refund_id", "refund_success",
         "notification_to", "_refund_state",
         "policy_events", "prompt_events", "specialist_handoffs",
+        "delegation_grant", "information_flow_events", "data_provenance",
+        "task_spec", "plan_graph", "verification_result",
     }
     nodes = []
     for log in logs:

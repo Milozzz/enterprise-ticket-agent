@@ -9,7 +9,7 @@ import os
 import pytest
 import pytest_asyncio
 import httpx
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import create_async_engine
 
 # 测试前设置内存数据库，避免污染 ticket.db
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
@@ -62,22 +62,38 @@ class TestDebugEndpoint:
 class TestResumeEndpoint:
     async def test_resume_rejects_non_manager(self, client):
         """非 MANAGER 角色调用 /resume 应返回 403"""
-        response = await client.post("/api/agent/resume", json={
-            "thread_id": "test-thread",
-            "action": "approve",
-            "reviewer_role": "USER",
-            "reviewer_id": "user_001",
-            "comment": "",
-        })
+        from app.core.auth import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user_001", "role": "USER", "tenant_id": "default"
+        }
+        try:
+            response = await client.post("/api/agent/resume", json={
+                "thread_id": "test-thread",
+                "action": "approve",
+                "reviewer_role": "MANAGER",
+                "reviewer_id": "forged-manager",
+                "comment": "",
+            })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
         assert response.status_code == 403
 
     async def test_resume_accepts_manager_role(self, client):
         """MANAGER 角色调用 /resume 应返回 200（即使 thread 不存在也应流式响应）"""
-        response = await client.post("/api/agent/resume", json={
-            "thread_id": "nonexistent-thread-xyz",
-            "action": "approve",
-            "reviewer_role": "MANAGER",
-            "reviewer_id": "manager_001",
-            "comment": "approved",
-        })
+        from app.core.auth import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "manager_001", "role": "MANAGER", "tenant_id": "default"
+        }
+        try:
+            response = await client.post("/api/agent/resume", json={
+                "thread_id": "nonexistent-thread-xyz",
+                "action": "approve",
+                "reviewer_role": "USER",
+                "reviewer_id": "forged-user",
+                "comment": "approved",
+            })
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
         assert response.status_code == 200

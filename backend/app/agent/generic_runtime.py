@@ -13,6 +13,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 
 from app.agent.planner import ERP_READONLY_TOOLS, plan_and_execute
+from app.agent.evidence_graph import add_runtime_evidence
+from app.agent.plan_graph import build_plan_graph, mark_plan_steps
 from app.agent.scenario_registry import ScenarioConfig, get_default_registry
 from app.agent.state import AgentState
 from app.agent.tool_gateway import execute_tool, gateway_context_from_state
@@ -20,6 +22,13 @@ from app.core.config import get_settings
 from app.agent.tools.enterprise_tools import create_permission_request, create_reimbursement_request
 from app.agent.ui_events import build_business_request_card, build_generic_approval_panel
 from app.agent.utils import get_state_val
+from app.agent.task_spec import build_task_spec, enrich_task_spec
+from app.agent.verifier import verify_generic_post_execution, verify_generic_preflight
+from app.agent.execution_governance import (
+    PlanExecutionBlocked,
+    authorize_plan_step,
+    finish_plan_step,
+)
 from app.core.logging import get_logger
 from app.core.policy import (
     PolicyDecision,
@@ -84,6 +93,22 @@ async def run_configured_scenario(
         state=state,
         scenario=scenario,
     )
+    missing_slots = find_missing_required_slots(slots, slot_config)
+    if missing_slots:
+        fields = dict(slot_config.get("fields") or {})
+        labels = [str(fields.get(name, {}).get("label") or name) for name in missing_slots]
+        return {
+            "intent": scenario.id,
+            "scenario_id": scenario.id,
+            "error_message": f"缺少必填信息：{'、'.join(labels)}，未创建业务单据。",
+            "missing_slots": missing_slots,
+            "current_step": f"{scenario.id}_slots_incomplete",
+        }
+    task_spec = enrich_task_spec(
+        get_state_val(state, "task_spec", {}) or build_task_spec(state, scenario),
+        slots=slots,
+    )
+    plan_graph = get_state_val(state, "plan_graph", {}) or build_plan_graph(task_spec)
 
     base_context = {
         "input": {"message": message},
@@ -108,6 +133,63 @@ async def run_configured_scenario(
             "current_step": f"{scenario.id}_policy_denied",
         }
 
+    trace_id = str(get_state_val(state, "trace_id", "") or "")
+    evidence_graph = add_runtime_evidence(
+        get_state_val(state, "evidence_graph", {}) or {},
+        scenario_id=scenario.id,
+        slots=slots,
+        policy_events=[decision.to_audit_event() for decision in policy_decisions],
+        tool_events=[],
+        request=None,
+        trace_id=trace_id,
+    )
+    verification = verify_generic_preflight(
+        scenario_id=scenario.id,
+        task_spec=task_spec,
+        plan_graph=plan_graph,
+        evidence_graph=evidence_graph,
+    )
+    if verification.status.value != "pass":
+        return {
+            "intent": scenario.id,
+            "scenario_id": scenario.id,
+            "task_spec": task_spec,
+            "evidence_graph": evidence_graph,
+            "verification_result": verification.model_dump(mode="json"),
+            "error_message": "执行前验证失败："
+            + "；".join(issue.message for issue in verification.issues),
+            "current_step": f"{scenario.id}_verification_blocked",
+        }
+
+    decision_step = "least_privilege" if scenario.id == "permission_request" else "validate_expense"
+    plan_graph = mark_plan_steps(
+        plan_graph,
+        {"understand": "completed", decision_step: "completed"},
+        graph_status="running",
+    )
+    governance_state = {
+        **dict(state),
+        "task_spec": task_spec,
+        "plan_graph": plan_graph,
+        "evidence_graph": evidence_graph,
+        "policy_events": [decision.to_audit_event() for decision in policy_decisions],
+    }
+    try:
+        plan_graph, execution_budget, create_started = authorize_plan_step(
+            governance_state,
+            "create_request",
+        )
+    except PlanExecutionBlocked as exc:
+        return {
+            "intent": scenario.id,
+            "scenario_id": scenario.id,
+            "task_spec": task_spec,
+            "plan_graph": {**plan_graph, "status": "blocked"},
+            "evidence_graph": evidence_graph,
+            "error_message": str(exc),
+            "current_step": f"{scenario.id}_plan_execution_blocked",
+        }
+
     # A4：声明了 planner.enabled 的场景（且全局 AGENT_PLANNER_ENABLED=1）
     # 由 LLM 在场景工具白名单内规划执行序列；每步仍经 tool_gateway 全量治理。
     # 规划失败/计划无效/LLM 不可用 → 无损降级回下方静态配置的工具序列。
@@ -127,6 +209,7 @@ async def run_configured_scenario(
             allowed_tools=allowed,
             handlers=TOOL_HANDLERS,
             dry_run=dry_run,
+            planner_config=planner_config,
         )
         if plan_execution.used_planner:
             tool_results = list(plan_execution.results)
@@ -166,7 +249,7 @@ async def run_configured_scenario(
         )
         tool_results.append(tool_result)
         if not tool_result.success:
-            return {
+            failed = {
                 "intent": scenario.id,
                 "scenario_id": scenario.id,
                 "error_message": tool_result.error or f"{scenario.name} tool execution failed.",
@@ -174,6 +257,13 @@ async def run_configured_scenario(
                 "policy_events": [decision.to_audit_event() for decision in policy_decisions],
                 "current_step": f"{scenario.id}_error",
             }
+            governed = finish_plan_step(
+                {**governance_state, "plan_graph": plan_graph, "execution_budget": execution_budget},
+                failed,
+                step_id="create_request",
+                started=create_started,
+            )
+            return {**failed, **governed}
 
     if not tool_results:
         raise ValueError(f"Scenario '{scenario.id}' does not define runtime tools.")
@@ -192,6 +282,56 @@ async def run_configured_scenario(
     request_data.setdefault("currency", "CNY")
     if scenario.id == "reimbursement":
         request_data.setdefault("costCenterId", "CC-SUPPORT")
+    evidence_graph = add_runtime_evidence(
+        evidence_graph,
+        scenario_id=scenario.id,
+        slots=slots,
+        policy_events=[decision.to_audit_event() for decision in policy_decisions],
+        tool_events=[item.audit_event or {} for item in tool_results],
+        request=request_data,
+        trace_id=trace_id,
+    )
+    governed = finish_plan_step(
+        {
+            **governance_state,
+            "plan_graph": plan_graph,
+            "execution_budget": execution_budget,
+            "evidence_graph": evidence_graph,
+        },
+        {"tool_gateway_events": [item.audit_event for item in tool_results]},
+        step_id="create_request",
+        started=create_started,
+    )
+    plan_graph = governed["plan_graph"]
+    execution_budget = governed["execution_budget"]
+    verification = verify_generic_post_execution(
+        scenario_id=scenario.id,
+        task_spec=task_spec,
+        plan_graph=plan_graph,
+        evidence_graph=evidence_graph,
+        request=request_data,
+    )
+    if verification.status.value != "pass":
+        return {
+            "intent": scenario.id,
+            "scenario_id": scenario.id,
+            "task_spec": task_spec,
+            "plan_graph": {**plan_graph, "status": "blocked"},
+            "evidence_graph": evidence_graph,
+            "execution_budget": execution_budget,
+            "execution_journal": governed.get("execution_journal", []),
+            "verification_result": verification.model_dump(mode="json"),
+            "error_message": "执行后验证失败："
+            + "；".join(issue.message for issue in verification.issues),
+            "current_step": f"{scenario.id}_post_verification_blocked",
+        }
+    plan_graph = mark_plan_steps(
+        plan_graph,
+        {
+            "approve": "waiting_approval" if policy_decision.requires_human_review else "planned",
+        },
+        graph_status="waiting_approval" if policy_decision.requires_human_review else "running",
+    )
 
     full_context = {
         **base_context,
@@ -221,6 +361,12 @@ async def run_configured_scenario(
         "reply_text": reply_text,
         "current_step": str(runtime.get("current_step") or f"{scenario.id}_done"),
         "ui_events": ui_events,
+        "task_spec": task_spec,
+        "plan_graph": plan_graph,
+        "evidence_graph": evidence_graph,
+        "verification_result": verification.model_dump(mode="json"),
+        "execution_budget": execution_budget,
+        "execution_journal": governed.get("execution_journal", []),
     }
     for key, expression in dict(runtime.get("state_outputs") or {}).items():
         result[key] = resolve_value(expression, full_context)
@@ -345,6 +491,9 @@ def _slot_value_missing(value: Any, field_config: Mapping[str, Any]) -> bool:
     """判断一个 slot 值是否算"缺失"（用于必填校验）。"""
     if value in (None, ""):
         return True
+    missing_values = {str(item) for item in field_config.get("missing_values", [])}
+    if str(value) in missing_values:
+        return True
     strategy = str(field_config.get("type") or "message_excerpt")
     if strategy == "amount":
         try:
@@ -352,6 +501,19 @@ def _slot_value_missing(value: Any, field_config: Mapping[str, Any]) -> bool:
         except (InvalidOperation, ValueError):
             return True
     return False
+
+
+def find_missing_required_slots(
+    slots: Mapping[str, Any],
+    slot_config: Mapping[str, Any],
+) -> list[str]:
+    fields = dict(slot_config.get("fields") or {})
+    return [
+        name
+        for name, field_config in fields.items()
+        if field_config.get("required")
+        and _slot_value_missing(slots.get(name), field_config)
+    ]
 
 
 async def fill_missing_required_slots(
@@ -372,12 +534,7 @@ async def fill_missing_required_slots(
     if not get_settings().slot_clarification_enabled:
         return slots, message
     fields = dict(slot_config.get("fields") or {})
-    missing = [
-        name
-        for name, field_config in fields.items()
-        if field_config.get("required")
-        and _slot_value_missing(slots.get(name), field_config)
-    ]
+    missing = find_missing_required_slots(slots, slot_config)
     if not missing:
         return slots, message
 
@@ -385,10 +542,14 @@ async def fill_missing_required_slots(
         str(fields[name].get("label") or fields[name].get("description") or name)
         for name in missing
     ]
+    prompts = [str(fields[name].get("prompt") or "") for name in missing]
+    question = f"办理「{scenario.name}」还需要补充：{'、'.join(labels)}"
+    if any(prompts):
+        question += "。" + "；".join(prompt for prompt in prompts if prompt)
     resume_value = interrupt(
         {
             "kind": "slot_filling",
-            "question": f"办理「{scenario.name}」还需要补充：{'、'.join(labels)}",
+            "question": question,
             "missing_fields": missing,
             "missing_labels": labels,
             "scenario_id": scenario.id,

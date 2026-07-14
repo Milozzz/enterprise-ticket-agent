@@ -14,6 +14,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from app.agent.dependencies import get_agent_dependencies
+from app.agent.nodes.classifier import classify_intent_fast_path
 from app.agent.scenario_registry import get_default_registry
 from app.agent.state import AgentState
 from app.agent.utils import get_state_val
@@ -192,6 +193,22 @@ async def supervisor_router_node(state: AgentState) -> dict:
         "review_roles": list(config.hitl.review_roles),
     }
 
+    classification_prefill: dict = {}
+    if scenario_id == "refund":
+        fast_classification = classify_intent_fast_path(user_message)
+        if fast_classification is not None:
+            decision["classification_prefilled"] = True
+            decision["sub_intent"] = fast_classification.get("intent")
+            decision["sub_intent_method"] = "rules_fast_path"
+            classification_prefill = {
+                "intent": str(fast_classification.get("intent") or "other"),
+                "order_id": str(fast_classification.get("order_id") or ""),
+                "refund_reason": str(fast_classification.get("reason") or "other"),
+                "refund_description": str(
+                    fast_classification.get("description") or user_message
+                ),
+            }
+
     logger.info(
         "supervisor_routed",
         scenario_id=scenario_id,
@@ -235,6 +252,7 @@ async def supervisor_router_node(state: AgentState) -> dict:
                 },
             }
         ],
+        **classification_prefill,
     }
     if degraded:
         result["llm_degraded"] = True

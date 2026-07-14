@@ -33,7 +33,7 @@ def test_fresh_upgrade_rollback_and_schema_check(tmp_path):
     database = tmp_path / "fresh.db"
     _run_alembic(database, "upgrade", "head")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "07a8b9c0d1e2"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "3c4d5e6f7081"
         amount_type = next(
             row[2] for row in connection.execute("PRAGMA table_info(orders)") if row[1] == "amount"
         )
@@ -56,6 +56,22 @@ def test_fresh_upgrade_rollback_and_schema_check(tmp_path):
         assert connection.execute(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_execution_jobs'"
         ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_evidence_records'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_decision_records'"
+        ).fetchone()[0] == 1
+        for table in (
+            "agent_delegation_grants",
+            "agent_feedback_records",
+            "online_eval_cases",
+            "counterfactual_experiments",
+        ):
+            assert connection.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()[0] == 1
 
     _run_alembic(database, "downgrade", "a902ebde4f49")
     with sqlite3.connect(database) as connection:

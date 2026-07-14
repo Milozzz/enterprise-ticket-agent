@@ -27,27 +27,40 @@ Admin pages:
 这个项目重点展示的不是“调一个 LLM API”，而是企业 Agent 落地时更关键的工程能力：
 
 - **Supervisor 场景路由**：先由 supervisor 判断业务场景，再进入退款、权限申请、报销等不同 workflow。
-- **Configurable Runtime**：权限申请、报销场景通过 JSON 配置驱动 slot extraction、tool mapping、policy binding、UI template。
+- **受控自治执行**：Supervisor 生成统一 TaskSpec 和 PlanGraph，Specialist 收集 Evidence，独立 Verifier 通过后才允许进入 Policy/HITL 与确定性 Executor。
+- **有限重规划**：缺少可恢复证据时最多重规划一次；金额、币种、策略或审批证据不合法时 fail closed。
+- **Configurable Runtime v3**：退款、权限申请、报销三个活跃场景都由 v3 配置声明节点、边、条件路由和 PlanGraph 步骤绑定，并编译为 LangGraph；v2 schema 只保留向后兼容。
+- **可执行 PlanGraph 治理**：场景节点执行前必须通过依赖、Tool/Policy/HITL 证据和任务预算授权；节点完成后回写步骤状态与执行日志，不再让计划停留在展示层。
+- **完整任务预算**：统一限制 deadline、LLM 调用次数/费用、工具调用次数和失败次数；超限时 fail closed，并把原因写入可回放状态。
 - **Tool Gateway**：所有有副作用的工具调用统一经过权限、风险、幂等、审计边界。
+- **Agent Identity + 委托授权**：短期签名 Capability Token 绑定委托人、角色、租户、Agent、工具、资源、金额/币种、审批凭证和使用次数；持久 Grant 支持撤销与审计。
+- **Taint Tracking 信息流安全**：字段级记录企业数据、用户输入、RAG、工具和模型输出来源；高风险写入只接受带 Evidence ID 的 Verifier/人工去污结果。
+- **Online Eval + Feedback Loop**：线上接受、纠正、拒绝反馈自动形成候选 Eval Case，审核发布后进入版本化数据集，并按模型/Prompt/Policy/Plan 统计效果与漂移。
+- **Counterfactual Replay**：在零副作用 dry-run 中，用同一任务快照对比不同模型产物、Prompt、Policy 与 PlanGraph，输出决策变化和无效计划差异。
 - **Policy-as-Code**：审批规则从代码逻辑中抽离，支持确定性治理和安全测试。
 - **Human-in-the-loop**：高风险动作进入人工审批，支持多级审批链和 `stageId`。
 - **Permission-aware RAG**：退款政策问答返回引用来源和政策条款 ID，降低幻觉。
 - **Replay / Observability**：每个节点写入 AuditLog，Dashboard 可查看 trace replay、节点耗时、失败率。
-- **Eval / Simulation Lab**：支持 golden cases、场景级 eval、配置 dry-run，降低发布风险。
+- **Eval / Simulation Lab**：支持 golden cases、场景级 eval、配置 dry-run、120 条核心决策回归、48 条受控自治深度评估和 14 条故障注入，覆盖路由、规划、证据、策略、授权、补偿与重规划。
 - **SAP OData Connector Runtime**：支持 Mock/Live、API Key/OAuth/Principal Propagation、CSRF、ETag、分页、超时重试、熔断和只读/Shadow 保护。
 - **财务 Saga**：退款执行覆盖贷项凭证、客户未清项清账，以及清账失败后的自动冲销补偿。
 - **MCP + A2A**：提供 MCP Streamable HTTP 工具调用端点和 A2A Agent Card/任务生命周期，外部 Agent 无法绕过 Tool Gateway 与 HITL。
 - **持续发布门禁**：自动检查 Policy fail-closed、工具策略覆盖、ERP 写操作审批/幂等、场景 Eval 与 SAP 连接状态。
 - **Model Gateway 与成本治理**：节点级 Gemini/OpenAI/Anthropic 路由、provider failover、统一结构化输出与会话/每日成本账本。
+- **Procedural Memory**：只有验证成功的完成计划才会形成程序性记忆，后续任务可检索先例，但仍必须重新经过证据与权限验证。
+- **执行后验证与对账**：退款执行后校验 Saga、贷项凭证、清账凭证和 Transactional Outbox；通用场景校验业务单据、策略与审批证据，验证失败不会写入成功记忆。
 - **Durable Approval Inbox**：待办队列、SLA 倒计时/超时升级、批量审批、审批意见和申请人/审批人双视图。
+
+高级治理模块的架构、数据模型、API、威胁模型、部署步骤、测试策略和生产边界见
+[`docs/advanced-agent-governance.md`](docs/advanced-agent-governance.md)。
 
 ## Supported Scenarios
 
 | Scenario | Description | Runtime Style |
 | --- | --- | --- |
-| Refund | 订单退款、风控、自动退款或人工审批 | LangGraph workflow |
-| Permission Request | 企业系统/RBAC 权限申请 | Config-driven generic runtime |
-| Reimbursement | 报销申请、金额识别、财务审批 | Config-driven generic runtime |
+| Refund | 订单退款、风控、自动退款或人工审批 | Config-driven LangGraph v3 |
+| Permission Request | 企业系统/RBAC 权限申请 | Config-driven LangGraph v3 |
+| Reimbursement | 报销申请、金额识别、财务审批 | Config-driven LangGraph v3 |
 | Policy QA | 退款政策问答，返回 citations | RAG workflow |
 
 ## Architecture
@@ -57,14 +70,16 @@ flowchart LR
   U[User] --> F[Next.js Frontend]
   F --> B[FastAPI Backend]
   B --> S[Supervisor Router]
-  S --> R1[Refund Workflow]
-  S --> R2[Generic Scenario Runtime]
-  R2 --> C[Scenario Config v2]
-  R1 --> TG[Tool Gateway]
-  R2 --> TG
-  TG --> P[Policy-as-Code]
-  P --> H[HITL Approval]
-  TG --> DB[(PostgreSQL)]
+  S --> T[TaskSpec + PlanGraph]
+  T --> C[Scenario Config v3 Compiler]
+  C --> R[Specialist Runtime]
+  R --> E[Evidence Graph + Verifier]
+  E --> P[Policy-as-Code]
+  P -->|auto approved| TG[Tool Gateway]
+  P -->|review required| H[HITL Approval]
+  H --> TG
+  TG --> X[Executor + Reconciliation]
+  X --> DB[(PostgreSQL)]
   TG --> ERP[ERP Connector Runtime]
   ERP --> SAP[SAP S/4HANA OData]
   B --> MCP[MCP Streamable HTTP]
@@ -78,12 +93,12 @@ flowchart LR
 ## Core Workflow
 
 1. 前端通过 SSE 调用 `/api/chat`。
-2. 后端 LangGraph 进入 `supervisor_router`。
-3. Supervisor 根据场景配置和 fallback router 选择 workflow。
-4. Runtime 执行 slot extraction、Tool Gateway、Policy-as-Code。
-5. 低风险动作自动处理，高风险动作进入 HITL 审批。
-6. 所有节点输出 UI event、AuditLog、trace metadata。
-7. Dashboard 可以按 `thread_id` 回放完整执行链路。
+2. 后端 LangGraph 先初始化任务预算，再进入 `supervisor_router`。
+3. Supervisor 选择场景，`task_understanding` 创建 TaskSpec、检索已验证先例并生成可校验 PlanGraph。
+4. v3 compiler 按配置构建场景子图；每个节点执行前由 PlanGraph 校验依赖、证据与预算。
+5. Specialist 收集 Evidence，独立 Verifier 通过后才进入 Policy/HITL 和 Tool Gateway。
+6. Executor 完成写操作后执行通用后置校验；退款还必须通过财务 Saga 与 Outbox 对账。
+7. 所有节点输出 UI event、AuditLog、trace metadata 和 execution journal，Dashboard 可按 `thread_id` 回放。
 
 ## Tech Stack
 
@@ -175,6 +190,10 @@ Backend:
 | `SECRET_KEY` | Production | JWT/app secret |
 | `ADMIN_API_KEY` | Production | 后端与 Vercel 服务端代理共享的管理接口密钥，禁止使用 `NEXT_PUBLIC_` 前缀 |
 | `AGENT_PUBLIC_URL` | Production | A2A Agent Card 中公布的后端地址 |
+| `AGENT_DELEGATION_REQUIRED_FOR_WRITES` | Governance | 是否要求写/外部工具携带委托令牌 |
+| `AGENT_DELEGATION_TOKEN_MINUTES` | Governance | 委托令牌有效期，默认 15 分钟 |
+| `AGENT_INFORMATION_FLOW_MODE` | Governance | `off` / `audit` / `enforce`，生产建议完成覆盖验证后设为 `enforce` |
+| `ONLINE_EVAL_DRIFT_THRESHOLD` | LLMOps | 线上接受率下降告警阈值，默认 0.10 |
 | `SAP_CONNECTOR_MODE` | Optional | `mock` 或 `live`，默认 `mock` |
 | `SAP_BASE_URL` | Live SAP | SAP Sandbox/S/4HANA API 根地址 |
 | `SAP_AUTH_TYPE` | Live SAP | `api_key`、`oauth2_client_credentials`、`principal_propagation` 等 |
@@ -214,6 +233,12 @@ Frontend:
 
 ## Tests
 
+Agent 治理专项测试：
+
+```bash
+python -m pytest backend/tests/test_advanced_agent_governance.py -q
+```
+
 Core platform regression:
 
 ```bash
@@ -236,9 +261,14 @@ python -m evals.run_evals
 
 Recent verified result:
 
-- SAP/ERP platform regression: `54 passed`
+- Full backend regression: `307 passed, 1 skipped`
+- Ruff correctness (`F`) gate: passed
 - Frontend type check: passed
 - Rules-only eval dataset: `20/20` golden cases
+- Production-like core decision suite: `120/120`
+- Bounded-autonomy depth suite: `48/48`
+- Agent resilience and fault-injection suite: `14/14`
+- Streaming observability: `stream_first_result` TTFR P50/P95 is available in node latency metrics
 
 Note: full backend test collection requires `pytest-asyncio` from `backend/requirements-dev.txt`.
 

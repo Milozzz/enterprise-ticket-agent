@@ -94,6 +94,36 @@ interface FailedTrace {
   created_at: string | null;
 }
 
+interface AgentSloReport {
+  task_quality: {
+    terminal_tasks: number;
+    successful_tasks: number;
+    blocked_tasks: number;
+    in_progress_tasks: number;
+    task_success_rate: number;
+    plan_validity_rate: number;
+    tool_selection_accuracy: number;
+    evidence_coverage: number | null;
+    replan_success_rate: number;
+    human_override_rate: number;
+    policy_violation_rate: number;
+    compensation_success_rate: number;
+    cost_per_successful_task_usd: number | null;
+  };
+  latency: {
+    time_to_first_result_ms: MetricDistribution;
+    end_to_end_completion_ms: MetricDistribution;
+  };
+}
+
+interface MetricDistribution {
+  samples: number;
+  avg: number | null;
+  p50: number | null;
+  p95: number | null;
+  max: number | null;
+}
+
 const NODE_LABELS: Record<string, string> = {
   classify_intent: "意图识别", lookup_order: "查询订单",
   check_risk: "风控评估", human_review: "人工审批",
@@ -108,6 +138,7 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
   const [failedTraces, setFailedTraces] = useState<FailedTrace[]>([]);
   const [nodeLatency, setNodeLatency] = useState<NodeLatencyStat[]>([]);
   const [llmCosts, setLlmCosts] = useState<LlmCostReport | null>(null);
+  const [agentSlo, setAgentSlo] = useState<AgentSloReport | null>(null);
 
   useEffect(() => {
     fetch("/api/dashboard/failed-traces")
@@ -123,6 +154,11 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
     fetch("/api/dashboard/llm-costs?days=7")
       .then((r) => r.json())
       .then(setLlmCosts)
+      .catch(() => {});
+
+    fetch("/api/dashboard/agent-slo?hours=168")
+      .then((r) => r.json())
+      .then(setAgentSlo)
       .catch(() => {});
   }, []);
 
@@ -308,6 +344,8 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
         </div>
 
         {/* 节点耗时分布（近 7 天成功执行） */}
+        {agentSlo ? <AgentQualityPanel report={agentSlo} /> : null}
+
         {nodeLatency.length > 0 && (
           <Card className="border-slate-200/80 shadow-sm ring-1 ring-black/[0.04]">
             <CardHeader>
@@ -527,5 +565,88 @@ export function DashboardContent({ stats }: { stats: DashboardStats | null }) {
         </Card>
       </div>
     </div>
+  );
+}
+
+function AgentQualityPanel({ report }: { report: AgentSloReport }) {
+  const quality = report.task_quality;
+  const percent = (value: number | null) =>
+    value == null ? "--" : `${(value * 100).toFixed(1)}%`;
+  const duration = (value: number | null) =>
+    value == null ? "--" : `${Math.round(value)} ms`;
+  const metrics = [
+    ["任务成功率", percent(quality.task_success_rate)],
+    ["计划有效率", percent(quality.plan_validity_rate)],
+    ["工具选择准确率", percent(quality.tool_selection_accuracy)],
+    ["证据覆盖率", percent(quality.evidence_coverage)],
+    ["重规划成功率", percent(quality.replan_success_rate)],
+    ["补偿成功率", percent(quality.compensation_success_rate)],
+  ];
+
+  return (
+    <Card className="border-slate-200/80 shadow-sm ring-1 ring-black/[0.04]">
+      <CardHeader>
+        <div className="flex flex-wrap items-center gap-2">
+          <ShieldAlert className="h-4 w-4 text-blue-600" />
+          <CardTitle className="text-base">Agent 任务质量（近 7 天）</CardTitle>
+          <Badge variant="outline" className="ml-auto">
+            {quality.terminal_tasks} 个终态任务
+          </Badge>
+        </div>
+        <CardDescription>
+          计划、证据、工具授权、重规划、补偿、成本和端到端延迟的统一口径
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-px overflow-hidden rounded-md border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-3">
+          {metrics.map(([label, value]) => (
+            <div key={label} className="bg-white px-4 py-3">
+              <p className="text-xs text-slate-500">{label}</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{value}</p>
+            </div>
+          ))}
+        </div>
+        <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <p className="text-xs text-slate-500">首结果 P50 / P95</p>
+            <p className="mt-1 font-medium text-slate-900">
+              {duration(report.latency.time_to_first_result_ms.p50)} / {duration(report.latency.time_to_first_result_ms.p95)}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">完成耗时 P50 / P95</p>
+            <p className="mt-1 font-medium text-slate-900">
+              {duration(report.latency.end_to_end_completion_ms.p50)} / {duration(report.latency.end_to_end_completion_ms.p95)}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">人工覆盖率</p>
+            <p className="mt-1 font-medium text-slate-900">{percent(quality.human_override_rate)}</p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">成功任务平均模型成本</p>
+            <p className="mt-1 font-medium text-slate-900">
+              {quality.cost_per_successful_task_usd == null
+                ? "--"
+                : `$${quality.cost_per_successful_task_usd.toFixed(6)}`}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <Badge variant="outline">阻断 {quality.blocked_tasks}</Badge>
+          <Badge variant="outline">处理中 {quality.in_progress_tasks}</Badge>
+          <Badge
+            variant="outline"
+            className={
+              quality.policy_violation_rate === 0
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                : "border-red-200 bg-red-50 text-red-700"
+            }
+          >
+            策略违规率 {percent(quality.policy_violation_rate)}
+          </Badge>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

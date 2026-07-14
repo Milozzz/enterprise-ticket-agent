@@ -2,7 +2,17 @@
 
 import { useEffect, useState, type ElementType } from "react";
 import Link from "next/link";
-import { ArrowLeft, FlaskConical, GitBranch, Loader2, Play, ShieldCheck } from "lucide-react";
+import {
+  Activity,
+  ArrowLeft,
+  FlaskConical,
+  GitBranch,
+  GitCompareArrows,
+  Loader2,
+  Play,
+  ShieldCheck,
+  Siren,
+} from "lucide-react";
 
 import { Header } from "@/components/Header";
 import { Badge } from "@/components/ui/badge";
@@ -31,12 +41,15 @@ async function readJsonOrThrow(res: Response, label: string) {
 
 export default function SimulationLabPage() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
-  const [scenarioId, setScenarioId] = useState("permission_request");
-  const [message, setMessage] = useState("permission request GitHub admin access for production release");
+  const [scenarioId, setScenarioId] = useState("refund");
+  const [message, setMessage] = useState("订单 123456 申请退款，商品已退回仓库");
   const [loading, setLoading] = useState(false);
   const [runtimeResult, setRuntimeResult] = useState<Record<string, unknown> | null>(null);
   const [routeResult, setRouteResult] = useState<Record<string, unknown> | null>(null);
   const [evalResult, setEvalResult] = useState<Record<string, unknown> | null>(null);
+  const [faultResult, setFaultResult] = useState<Record<string, unknown> | null>(null);
+  const [onlineEvalResult, setOnlineEvalResult] = useState<Record<string, unknown> | null>(null);
+  const [counterfactualResult, setCounterfactualResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -44,7 +57,11 @@ export default function SimulationLabPage() {
       .then((res) => res.json())
       .then((data) => {
         setScenarios(data.scenarios ?? []);
-        if (data.scenarios?.[0]?.id) setScenarioId(data.scenarios[0].id);
+        if (data.scenarios?.some((item: ScenarioSummary) => item.id === "refund")) {
+          setScenarioId("refund");
+        } else if (data.scenarios?.[0]?.id) {
+          setScenarioId(data.scenarios[0].id);
+        }
       })
       .catch((err) => setError(err instanceof Error ? err.message : "加载场景失败"));
   }, []);
@@ -55,8 +72,11 @@ export default function SimulationLabPage() {
     setRuntimeResult(null);
     setRouteResult(null);
     setEvalResult(null);
+    setFaultResult(null);
+    setOnlineEvalResult(null);
+    setCounterfactualResult(null);
     try {
-      const [routeRes, runtimeRes, evalRes] = await Promise.all([
+      const [routeRes, runtimeRes, evalRes, faultRes, onlineEvalRes, counterfactualRes] = await Promise.all([
         fetch("/api/admin/scenarios/simulate-route", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -65,15 +85,46 @@ export default function SimulationLabPage() {
         fetch(`/api/admin/scenarios/${scenarioId}/simulate-runtime`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, user_id: "sim-user", user_role: "USER", dry_run: true }),
+          body: JSON.stringify({
+            message,
+            user_id: "sim-user",
+            user_role: "USER",
+            dry_run: true,
+          }),
         }),
         fetch(`/api/admin/scenarios/${scenarioId}/eval`, { method: "POST" }),
+        fetch("/api/admin/evals/agent-resilience", { cache: "no-store" }),
+        fetch("/api/agent/governance/online-eval/report?window_hours=24", { cache: "no-store" }),
+        fetch("/api/agent/governance/counterfactual/replay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scenario_id: scenarioId,
+            requested_by: "simulation-lab",
+            variants: [
+              {
+                variant_id: "strict-policy",
+                model: "candidate-model",
+                prompt_version: "candidate-prompt",
+                policy_document: {
+                  version: "simulation-strict-v1",
+                  refund_review: {
+                    rules: [{ id: "all-refunds-hitl", when: { amount_gte: 0 } }],
+                  },
+                },
+              },
+            ],
+          }),
+        }),
       ]);
       setRouteResult(await readJsonOrThrow(routeRes, "Route simulation"));
       setRuntimeResult(await readJsonOrThrow(runtimeRes, "Runtime dry-run"));
       setEvalResult(await readJsonOrThrow(evalRes, "Scenario eval"));
+      setFaultResult(await readJsonOrThrow(faultRes, "Fault injection"));
+      setOnlineEvalResult(await readJsonOrThrow(onlineEvalRes, "Online eval"));
+      setCounterfactualResult(await readJsonOrThrow(counterfactualRes, "Counterfactual replay"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "模拟失败");
+      setError(err instanceof Error ? err.message : "模拟运行失败");
     } finally {
       setLoading(false);
     }
@@ -92,21 +143,29 @@ export default function SimulationLabPage() {
             </Button>
             <div>
               <h1 className="text-xl font-bold text-slate-950">Simulation Lab</h1>
-              <p className="text-sm text-slate-500">路由、运行时 dry-run、场景级 eval 的完整链路预演</p>
+              <p className="text-sm text-slate-500">路由、运行时、回归评测与故障注入验证</p>
             </div>
           </div>
           <Button onClick={runSimulation} disabled={loading}>
-            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-            运行模拟
+            {loading ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="mr-2 h-4 w-4" />
+            )}
+            运行完整模拟
           </Button>
         </div>
 
-        {error ? <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+        {error ? (
+          <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {error}
+          </div>
+        ) : null}
 
         <div className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">输入</CardTitle>
+              <CardTitle className="text-base">模拟输入</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <label className="block text-sm font-medium text-slate-700">
@@ -124,19 +183,26 @@ export default function SimulationLabPage() {
                 </select>
               </label>
               <label className="block text-sm font-medium text-slate-700">
-                测试话术
-                <Textarea value={message} onChange={(event) => setMessage(event.target.value)} className="mt-2 min-h-32" />
+                测试请求
+                <Textarea
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  className="mt-2 min-h-32"
+                />
               </label>
               <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">
-                dry-run 会执行抽槽、策略、Tool Gateway 和 UI 事件生成，但不会产生真实业务副作用。
+                Dry-run 会执行任务理解、策略、Tool Gateway 和 UI 事件生成，但不会产生真实业务副作用。故障套件运行在隔离沙箱中，不会污染线上熔断状态。
               </div>
             </CardContent>
           </Card>
 
-          <div className="grid gap-4 xl:grid-cols-3">
+          <div className="grid gap-4 xl:grid-cols-2">
             <ResultPanel title="Supervisor 路由" icon={GitBranch} data={routeResult} />
             <ResultPanel title="Runtime Dry-run" icon={FlaskConical} data={runtimeResult} />
             <ResultPanel title="场景 Eval" icon={ShieldCheck} data={evalResult} />
+            <ResultPanel title="故障注入" icon={Siren} data={faultResult} />
+            <ResultPanel title="Online Eval" icon={Activity} data={onlineEvalResult} />
+            <ResultPanel title="Counterfactual Replay" icon={GitCompareArrows} data={counterfactualResult} />
           </div>
         </div>
       </main>
@@ -163,7 +229,7 @@ function ResultPanel({
         <Badge variant="outline">{data ? "ready" : "idle"}</Badge>
       </CardHeader>
       <CardContent>
-        <pre className="max-h-[560px] overflow-auto rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">
+        <pre className="max-h-[440px] overflow-auto rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">
           {data ? JSON.stringify(data, null, 2) : "尚未运行"}
         </pre>
       </CardContent>

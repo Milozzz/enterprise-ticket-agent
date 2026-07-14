@@ -6,9 +6,13 @@ from typing import Any
 
 from app.agent.mcp_adapter import EXECUTABLE_MCP_TOOLS
 from app.agent.scenario_eval import run_all_scenario_evals
+from app.agent.production_quality_eval import run_production_quality_eval
+from app.agent.agent_depth_eval import run_agent_depth_eval
+from app.agent.agent_resilience_eval import run_agent_resilience_eval
 from app.agent.tool_gateway import TOOL_SPECS, ToolSideEffect
 from app.core.policy import load_policy
 from app.erp.runtime import load_connector_runtime_config
+from app.agent.scenario_registry import get_default_registry
 
 
 async def run_enterprise_readiness_eval(
@@ -24,9 +28,29 @@ async def run_enterprise_readiness_eval(
         if spec.name.startswith("erp_") and spec.side_effect == ToolSideEffect.WRITE
     ]
     scenario_evals = await run_all_scenario_evals()
+    production_quality = run_production_quality_eval()
+    agent_depth = run_agent_depth_eval()
+    agent_resilience = run_agent_resilience_eval()
     connector = await load_connector_runtime_config(connector_id)
+    active_scenarios = [
+        scenario
+        for scenario in get_default_registry().list()
+        if scenario.status == "active"
+    ]
 
     checks = [
+        _check(
+            "declarative_v3_runtime",
+            bool(active_scenarios)
+            and all(
+                str((scenario.runtime or {}).get("schema_version")) == "3"
+                and (scenario.runtime or {}).get("engine") == "langgraph"
+                for scenario in active_scenarios
+            ),
+            "Every active scenario uses the validated declarative LangGraph v3 runtime.",
+            details={"scenarios": [scenario.id for scenario in active_scenarios]},
+            severity="required",
+        ),
         _check(
             "policy_fail_closed",
             policy.get("default_action_effect") == "deny",
@@ -70,6 +94,41 @@ async def run_enterprise_readiness_eval(
             severity="required",
         ),
         _check(
+            "production_quality_suite",
+            production_quality["case_count"] >= 100
+            and production_quality["pass_rate"] == 1.0,
+            "At least 100 production-like routing, slot, policy, and authorization cases pass.",
+            details={
+                "case_count": production_quality["case_count"],
+                "pass_rate": production_quality["pass_rate"],
+                "dimensions": production_quality["dimensions"],
+            },
+            severity="required",
+        ),
+        _check(
+            "bounded_autonomy_depth",
+            agent_depth["case_count"] >= 48 and agent_depth["pass_rate"] == 1.0,
+            "TaskSpec, PlanGraph, verifier, safety block, and bounded replan cases pass.",
+            details={
+                "case_count": agent_depth["case_count"],
+                "pass_rate": agent_depth["pass_rate"],
+                "dimensions": agent_depth["dimensions"],
+            },
+            severity="required",
+        ),
+        _check(
+            "agent_resilience_faults",
+            agent_resilience["case_count"] >= 14
+            and agent_resilience["pass_rate"] == 1.0,
+            "Fault injection proves bounded failure, quarantine, replan, denial, and compensation controls.",
+            details={
+                "case_count": agent_resilience["case_count"],
+                "pass_rate": agent_resilience["pass_rate"],
+                "quality_metrics": agent_resilience["quality_metrics"],
+            },
+            severity="required",
+        ),
+        _check(
             "live_sap_connection",
             connector.mode == "live" and bool(connector.base_url),
             "A live SAP endpoint is configured.",
@@ -102,6 +161,9 @@ async def run_enterprise_readiness_eval(
         ),
         "checks": checks,
         "scenario_evals": scenario_evals,
+        "production_quality": production_quality,
+        "agent_depth": agent_depth,
+        "agent_resilience": agent_resilience,
         "next_actions": [
             check["remediation"]
             for check in checks
@@ -120,11 +182,15 @@ def _check(
 ) -> dict[str, Any]:
     remediations = {
         "policy_fail_closed": "Set default_action_effect to deny.",
+        "declarative_v3_runtime": "Migrate every active scenario to declarative LangGraph v3.",
         "tool_policy_coverage": "Add explicit Policy-as-Code entries for missing tool actions.",
         "erp_write_approval": "Require approval evidence for every ERP write tool.",
         "erp_write_idempotency": "Define stable idempotency fields for every ERP write tool.",
         "mcp_runtime_coverage": "Register an executable handler for every exposed ERP MCP tool.",
         "scenario_regression_evals": "Fix failed scenario evals before publishing.",
+        "production_quality_suite": "Fix production-like decision regressions before publishing.",
+        "bounded_autonomy_depth": "Fix task, plan, evidence, verifier, or replanning regressions.",
+        "agent_resilience_faults": "Fix failed fault-injection controls before publishing.",
         "live_sap_connection": "Configure SAP_CONNECTOR_MODE=live and SAP_BASE_URL for a sandbox tenant.",
         "named_user_authentication": "Configure principal propagation or OAuth2 client credentials.",
         "safe_write_activation": "Re-enable read-only or shadow mode until production approval is recorded.",

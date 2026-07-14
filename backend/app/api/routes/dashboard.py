@@ -251,6 +251,7 @@ async def get_node_latency():
 
         result = []
         NODE_ORDER = [
+            "stream_first_result", "supervisor_router",
             "classify_intent", "lookup_order", "fetch_user_history",
             "check_risk", "human_review", "execute_refund",
             "send_notification", "answer_node", "summarize_session",

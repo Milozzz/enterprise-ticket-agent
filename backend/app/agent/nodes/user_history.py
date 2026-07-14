@@ -69,6 +69,10 @@ async def fetch_user_history_node(state: AgentState) -> dict:
             str(user_id),
             tenant_id=str(get_state_val(state, "tenant_id", "default") or "default"),
             memory_types=["dispute_history", "risk_signal", "preference"],
+            query=(
+                f"{get_state_val(state, 'refund_reason', '')} "
+                f"{get_state_val(state, 'refund_description', '')}"
+            ).strip(),
             session_factory=resolve_session_factory(AsyncSessionLocal),
         )
         user_history["long_term_memories"] = memories

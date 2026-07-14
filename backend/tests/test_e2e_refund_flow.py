@@ -26,6 +26,8 @@ tests/test_e2e_refund_flow.py
 
 import os
 import json
+from datetime import datetime
+from decimal import Decimal
 import pytest
 import pytest_asyncio
 import httpx
@@ -121,8 +123,28 @@ async def client_and_db(tmp_path_factory):
     预置 User 和 Order 行，避免 lookup_order_node 查不到数据。
     """
     from app.main import app
+    from app.agent.dependencies import (
+        AgentDependencies,
+        get_agent_dependencies,
+        set_agent_dependencies,
+    )
     from app.db.database import Base
-    from app.db.models import User, Order, UserRole
+    from app.db.models import (
+        CustomerProfile,
+        ErpFulfillmentStatus,
+        ErpInspectionResult,
+        ErpOrderLine,
+        ErpReturnStatus,
+        InventoryItem,
+        Order,
+        ProductCatalog,
+        RefundRequest,
+        ReturnAuthorization,
+        ReturnInspection,
+        User,
+        UserRole,
+        Warehouse,
+    )
     import app.api.routes.chat as chat_route
     import app.agent.nodes.risk_check as risk_check_node
     import app.agent.nodes.user_history as user_history_node
@@ -139,6 +161,12 @@ async def client_and_db(tmp_path_factory):
     refund_node.AsyncSessionLocal = Session
     human_review_node.AsyncSessionLocal = Session
     ticket_repository.AsyncSessionLocal = Session
+    set_agent_dependencies(
+        AgentDependencies(
+            llm=get_agent_dependencies().llm,
+            session_factory=Session,
+        )
+    )
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -166,6 +194,91 @@ async def client_and_db(tmp_path_factory):
             ))
         await sess.commit()
 
+    # The production refund graph requires ERP return and inventory evidence
+    # before risk evaluation or a financial write can proceed.
+    async with Session() as sess:
+        order = await sess.get(Order, TEST_ORDER_ID)
+        order.tenant_id = "TENANT-DEMO-COMMERCE"
+        order.source_system = "E2E_ERP"
+        order.external_order_id = TEST_ORDER_ID
+        order.amount = Decimal(str(TEST_ORDER_AMT_HIGH))
+        order.currency = "CNY"
+        sess.add_all([
+            CustomerProfile(
+                customer_id="CUSTOMER-E2E",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                user_id=TEST_USER_ID,
+            ),
+            ProductCatalog(
+                product_id="PROD-E2E",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                sku="SKU-E2E",
+                name="E2E Product",
+                category="test",
+                price=Decimal(str(TEST_ORDER_AMT_HIGH)),
+            ),
+            Warehouse(
+                warehouse_id="WH-E2E",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                code="WH-E2E",
+                name="E2E Warehouse",
+                region="CN-East",
+            ),
+        ])
+        await sess.flush()
+        sess.add_all([
+            ErpOrderLine(
+                line_id="LINE-E2E-001",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                order_id=TEST_ORDER_ID,
+                product_id="PROD-E2E",
+                sku="SKU-E2E",
+                quantity=1,
+                unit_price=Decimal(str(TEST_ORDER_AMT_HIGH)),
+                fulfillment_status=ErpFulfillmentStatus.RETURNED,
+            ),
+            InventoryItem(
+                inventory_id="INV-E2E-001",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                product_id="PROD-E2E",
+                warehouse_id="WH-E2E",
+                quantity_on_hand=10,
+                quantity_reserved=0,
+            ),
+            RefundRequest(
+                refund_request_id="REFREQ-E2E",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                order_id=TEST_ORDER_ID,
+                customer_id="CUSTOMER-E2E",
+                requested_amount=Decimal(str(TEST_ORDER_AMT_HIGH)),
+                currency="CNY",
+                reason_code="DAMAGED",
+                description="E2E refund evidence",
+                risk_level="high",
+            ),
+        ])
+        await sess.flush()
+        sess.add_all([
+            ReturnAuthorization(
+                rma_id="RMA-E2E",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                refund_request_id="REFREQ-E2E",
+                order_id=TEST_ORDER_ID,
+                warehouse_id="WH-E2E",
+                status=ErpReturnStatus.INSPECTED,
+                received_at=datetime.utcnow(),
+            ),
+            ReturnInspection(
+                inspection_id="INSPECTION-E2E",
+                tenant_id="TENANT-DEMO-COMMERCE",
+                rma_id="RMA-E2E",
+                inspector_employee_id="EMP-E2E",
+                result=ErpInspectionResult.PASS,
+                restockable=True,
+            ),
+        ])
+        await sess.commit()
+
     async def fake_finance_saga(command, *, context):
         del context
         return {
@@ -188,6 +301,7 @@ async def client_and_db(tmp_path_factory):
         ) as c:
             yield c, Session
 
+    set_agent_dependencies(None)
     await engine.dispose()
 
 

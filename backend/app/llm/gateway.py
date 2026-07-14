@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
 from app.db.models import LLMUsageRecord
+from app.llm.task_budget import active_task_budget
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -53,6 +54,12 @@ class LLMProvidersExhausted(RuntimeError):
 
 class LLMTenantBudgetExceeded(RuntimeError):
     """B8: 租户当日 token 用量超出配额，本次调用被拒绝（下游节点会走规则降级）。"""
+
+    pass
+
+
+class LLMTaskBudgetExceeded(RuntimeError):
+    """Raised before a call when the current Agent task exhausted its budget."""
 
     pass
 
@@ -171,6 +178,43 @@ class LLMGateway:
                 f"({used}/{budget}); call to {node_name} rejected"
             )
 
+    async def _enforce_task_budget(
+        self,
+        node_name: str,
+        context: LLMCallContext | None,
+    ) -> None:
+        budget = active_task_budget()
+        if budget is None or context is None:
+            return
+        from sqlalchemy import func, select
+
+        filters = [
+            LLMUsageRecord.tenant_id
+            == (context.tenant_id or settings.default_tenant_id),
+            LLMUsageRecord.thread_id == context.thread_id,
+        ]
+        if context.trace_id:
+            filters.append(LLMUsageRecord.trace_id == context.trace_id)
+        async with self._session_factory() as session:
+            calls, cost = (
+                await session.execute(
+                    select(
+                        func.count(LLMUsageRecord.id),
+                        func.coalesce(func.sum(LLMUsageRecord.total_cost_usd), 0),
+                    ).where(*filters)
+                )
+            ).one()
+        if int(calls or 0) >= budget.max_calls:
+            raise LLMTaskBudgetExceeded(
+                f"Task LLM call budget exhausted before {node_name} "
+                f"({int(calls or 0)}/{budget.max_calls})"
+            )
+        if Decimal(str(cost or 0)) >= budget.max_cost_usd:
+            raise LLMTaskBudgetExceeded(
+                f"Task LLM cost budget exhausted before {node_name} "
+                f"({Decimal(str(cost or 0))}/{budget.max_cost_usd} USD)"
+            )
+
     def runnable(
         self,
         node_name: str,
@@ -210,14 +254,16 @@ class LLMGateway:
         prompt_version: str | None = None,
         prompt_variant: str | None = None,
         prompt_rollout_bucket: int | None = None,
+        candidate_overrides: list[ModelCandidate] | None = None,
     ) -> LLMCallResult:
-        candidates = self.candidates_for(node_name)
+        candidates = candidate_overrides or self.candidates_for(node_name)
         if not candidates:
             raise LLMProvidersExhausted(f"No configured LLM provider is available for {node_name}")
 
         # B8: 预算闸门在任何 provider 调用之前执行；超额直接拒绝，
         # 各节点已有的异常降级路径（规则 fallback + degraded 标注）自然接管。
         await self._enforce_tenant_budget(node_name, context)
+        await self._enforce_task_budget(node_name, context)
 
         errors: list[str] = []
         for fallback_index, candidate in enumerate(candidates):

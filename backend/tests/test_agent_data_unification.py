@@ -72,8 +72,19 @@ async def test_configured_permission_workflow_resumes_each_stage_and_persists_ca
     )
     assert final["business_request"]["status"] == "approved"
     assert len(final["approval_history"]) == 2
+    assert final["plan_graph"]["status"] == "completed"
+    assert final["verification_result"]["status"] == "pass"
+    assert "approval.decision" in {
+        item["predicate"] for item in final["evidence_graph"]["claims"]
+    }
+    assert final["evidence_graph"]["relations"]
 
     request_id = final["business_request"]["requestId"]
+    assert final["plan_graph"]["status"] == "completed"
+    assert final["verification_result"]["status"] == "pass"
+    assert "approval.decision" in {
+        item["predicate"] for item in final["evidence_graph"]["claims"]
+    }
     async with session_factory() as session:
         record = await session.get(AccessRequestRecord, request_id)
         assert record is not None

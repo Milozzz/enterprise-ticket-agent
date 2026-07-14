@@ -8,7 +8,7 @@ from app.agent.mcp_adapter import list_mcp_compatible_tools
 from app.agent.saga import SagaStep, execute_saga, refund_saga_template
 from app.agent.scenario_eval import run_scenario_eval
 from app.agent.scenario_registry import get_default_registry
-from app.agent.scenario_schema import RUNTIME_V2_SCHEMA
+from app.agent.scenario_schema import RUNTIME_V2_SCHEMA, RUNTIME_V3_SCHEMA
 from app.agent.scenario_templates import instantiate_template, list_scenario_templates
 from app.agent.scenario_versions import (
     create_scenario_version,
@@ -23,6 +23,14 @@ def test_runtime_v2_schema_declares_required_platform_contract():
     assert "slot_extraction" in RUNTIME_V2_SCHEMA["required"]
     assert "tool" in RUNTIME_V2_SCHEMA["required"]
     assert "policy" in RUNTIME_V2_SCHEMA["required"]
+
+
+def test_runtime_v3_schema_declares_declarative_graph_contract():
+    assert RUNTIME_V3_SCHEMA["properties"]["schema_version"]["const"] == "3"
+    assert RUNTIME_V3_SCHEMA["properties"]["engine"]["const"] == "langgraph"
+    assert {"entry_node", "nodes", "edges", "conditional_edges"} <= set(
+        RUNTIME_V3_SCHEMA["required"]
+    )
 
 
 def test_multilevel_approval_authorizes_stage_roles():
@@ -118,7 +126,8 @@ def test_template_marketplace_instantiates_runtime_ready_scenario():
 
     assert "access_governance" in template_ids
     assert scenario["id"] == "custom_access_governance"
-    assert scenario["runtime"]["schema_version"] == "2"
+    assert scenario["runtime"]["schema_version"] == "3"
+    assert scenario["runtime"]["engine"] == "langgraph"
     assert scenario["hitl"]["approval_chain"][0]["id"] == "manager_review"
 
 

@@ -1171,6 +1171,212 @@ class ExecutionEvidence(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class AgentEvidenceRecord(Base):
+    """Append-only, task-scoped evidence shared by every Agent scenario."""
+
+    __tablename__ = "agent_evidence_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "task_id", "evidence_id", name="uq_agent_evidence_task_id"
+        ),
+        UniqueConstraint(
+            "tenant_id", "task_id", "sequence", name="uq_agent_evidence_task_sequence"
+        ),
+        Index("ix_agent_evidence_task", "tenant_id", "task_id", "sequence"),
+        Index(
+            "ix_agent_evidence_entity",
+            "tenant_id",
+            "source_system",
+            "source_object",
+            "entity_id",
+        ),
+        Index("ix_agent_evidence_trace", "tenant_id", "trace_id"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    task_id: Mapped[str] = mapped_column(String(140), index=True)
+    evidence_id: Mapped[str] = mapped_column(String(140), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    scenario_id: Mapped[str] = mapped_column(String(80), index=True)
+    thread_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    trace_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    predicate: Mapped[str] = mapped_column(String(120), index=True)
+    claim: Mapped[str] = mapped_column(String(500))
+    subject: Mapped[str] = mapped_column(String(180), index=True)
+    observed_value: Mapped[dict] = mapped_column(JSON)
+    source_system: Mapped[str] = mapped_column(String(100), index=True)
+    source_object: Mapped[str] = mapped_column(String(100), index=True)
+    entity_id: Mapped[str] = mapped_column(String(180), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    valid_from: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    data_version: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    previous_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    record_hash: Mapped[str] = mapped_column(String(64), index=True)
+    evidence_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AgentEvidenceRelationRecord(Base):
+    """Persistent typed edge between two task-scoped evidence records."""
+
+    __tablename__ = "agent_evidence_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "task_id",
+            "source_record_id",
+            "target_record_id",
+            "relation_type",
+            name="uq_agent_evidence_relation",
+        ),
+        Index("ix_agent_evidence_relation_task", "tenant_id", "task_id"),
+    )
+
+    relation_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    task_id: Mapped[str] = mapped_column(String(140), index=True)
+    source_record_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_evidence_records.record_id"), index=True
+    )
+    target_record_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_evidence_records.record_id"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AgentDecisionRecord(Base):
+    """Verifier/planner decision that must cite persisted evidence IDs."""
+
+    __tablename__ = "agent_decision_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "task_id", "decision_id", name="uq_agent_decision_task_id"
+        ),
+        Index("ix_agent_decision_task", "tenant_id", "task_id", "created_at"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    task_id: Mapped[str] = mapped_column(String(140), index=True)
+    decision_id: Mapped[str] = mapped_column(String(140), index=True)
+    decision_type: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    reason_codes: Mapped[list] = mapped_column(JSON, default=list)
+    cited_evidence_ids: Mapped[list] = mapped_column(JSON, default=list)
+    decision_payload: Mapped[dict] = mapped_column(JSON)
+    verifier: Mapped[str] = mapped_column(String(100), default="deterministic_verifier")
+    trace_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AgentDelegationGrant(Base):
+    """Durable record behind a short-lived Agent capability token."""
+
+    __tablename__ = "agent_delegation_grants"
+    __table_args__ = (
+        Index("ix_agent_delegation_principal", "tenant_id", "principal_id", "status"),
+        Index("ix_agent_delegation_agent", "tenant_id", "agent_id", "expires_at"),
+        UniqueConstraint("tenant_id", "token_jti_hash", name="uq_agent_delegation_jti"),
+    )
+
+    grant_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    principal_id: Mapped[str] = mapped_column(String(120), index=True)
+    principal_role: Mapped[str] = mapped_column(String(40))
+    issued_by: Mapped[str] = mapped_column(String(120), index=True)
+    agent_id: Mapped[str] = mapped_column(String(120), index=True)
+    allowed_tools: Mapped[list] = mapped_column(JSON, default=list)
+    resource_scopes: Mapped[dict] = mapped_column(JSON, default=dict)
+    constraints: Mapped[dict] = mapped_column(JSON, default=dict)
+    purpose: Mapped[str] = mapped_column(String(500), default="")
+    approval_id: Mapped[Optional[str]] = mapped_column(String(140), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    token_jti_hash: Mapped[str] = mapped_column(String(64), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    max_uses: Mapped[int] = mapped_column(Integer, default=1)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class AgentFeedbackRecord(Base):
+    """Human outcome feedback linked to a production Agent execution."""
+
+    __tablename__ = "agent_feedback_records"
+    __table_args__ = (
+        Index("ix_agent_feedback_window", "tenant_id", "scenario_id", "created_at"),
+        Index("ix_agent_feedback_version", "tenant_id", "created_at"),
+    )
+
+    feedback_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    thread_id: Mapped[str] = mapped_column(String(120), index=True)
+    trace_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(140), nullable=True, index=True)
+    scenario_id: Mapped[str] = mapped_column(String(100), index=True)
+    submitted_by: Mapped[str] = mapped_column(String(120), index=True)
+    disposition: Mapped[str] = mapped_column(String(30), index=True)
+    rating: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    reason_codes: Mapped[list] = mapped_column(JSON, default=list)
+    correction: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    task_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    version_context: Mapped[dict] = mapped_column(JSON, default=dict)
+    eval_candidate: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class OnlineEvalCase(Base):
+    """Governed candidate promoted from production feedback into an eval set."""
+
+    __tablename__ = "online_eval_cases"
+    __table_args__ = (
+        Index("ix_online_eval_dataset", "tenant_id", "dataset_name", "status"),
+        UniqueConstraint("tenant_id", "source_feedback_id", name="uq_online_eval_feedback"),
+    )
+
+    case_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    source_feedback_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_feedback_records.feedback_id"), index=True
+    )
+    dataset_name: Mapped[str] = mapped_column(String(120), default="production_feedback", index=True)
+    scenario_id: Mapped[str] = mapped_column(String(100), index=True)
+    input_snapshot: Mapped[dict] = mapped_column(JSON)
+    expected_outcome: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(30), default="candidate", index=True)
+    dataset_version: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, index=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class CounterfactualExperiment(Base):
+    """Side-effect-free replay comparing model, prompt, policy and plan variants."""
+
+    __tablename__ = "counterfactual_experiments"
+    __table_args__ = (
+        Index("ix_counterfactual_task", "tenant_id", "thread_id", "created_at"),
+    )
+
+    experiment_id: Mapped[str] = mapped_column(String(140), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(50), default=current_tenant_id, index=True)
+    thread_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(140), nullable=True, index=True)
+    requested_by: Mapped[str] = mapped_column(String(120), index=True)
+    baseline_snapshot: Mapped[dict] = mapped_column(JSON)
+    variants: Mapped[list] = mapped_column(JSON)
+    result: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(30), default="completed", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class A2ATask(Base):
     """Durable Agent2Agent task used by Joule BYOA and other A2A clients."""
 

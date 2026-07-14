@@ -233,7 +233,11 @@ async def check_risk_node(state: AgentState) -> dict:
                 execute_tool,
                 "check_risk_level",
                 risk_args,
-                context=gateway_context_from_state(state, actor_role="AGENT"),
+                context=gateway_context_from_state(
+                    state,
+                    actor_role="AGENT",
+                    specialist_id="risk_specialist",
+                ),
                 handler=check_risk_level,
             ),
             _load_user_memory(user_id, tenant_id),
